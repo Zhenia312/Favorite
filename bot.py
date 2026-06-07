@@ -526,4 +526,5 @@ async def main():
                 print(f"[ERROR] {e}")
             await asyncio.sleep(POLL_INTERVAL if is_running else 10)
 
-if __name__ == "__main__"
+if __name__ == "__main__":
+    asyncio.run(main())
