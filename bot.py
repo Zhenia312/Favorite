@@ -67,8 +67,12 @@ leagues_enabled = {
     "tennis":     {lid: True for lid in TENNIS_LEAGUES},
 }
 
-user_state = {
-    "menu": None
+user_state = {"menu": None}
+
+api_requests = {
+    "football":   {"used": 0, "limit": 100},
+    "basketball": {"used": 0, "limit": 100},
+    "tennis":     {"used": 0, "limit": 100},
 }
 
 stats = {
@@ -155,6 +159,14 @@ async def get_updates(session):
             return data.get("result", [])
     except:
         return []
+
+# ── ЛІЧИЛЬНИК ЗАПИТІВ ─────────────────────────────────────────────────────
+def track_request(sport):
+    api_requests[sport]["used"] += 1
+
+def requests_left(sport):
+    r = api_requests[sport]
+    return r["limit"] - r["used"]
 
 # ── ОБРОБКА КОМАНД ────────────────────────────────────────────────────────
 async def process_commands(session):
@@ -281,6 +293,10 @@ async def send_stat(session):
     b_leagues = [n for lid, n in BASKETBALL_LEAGUES.items() if leagues_enabled["basketball"][lid]]
     t_leagues = [n for lid, n in TENNIS_LEAGUES.items()     if leagues_enabled["tennis"][lid]]
 
+    fl = requests_left("football")
+    bl = requests_left("basketball")
+    tl = requests_left("tennis")
+
     lines = [
         "📊 *Статистика FavTracker*\n",
         f"🕐 Запущено: {stats['started_at']}",
@@ -292,6 +308,10 @@ async def send_stat(session):
         f"  ⚽ Футбол: {stats['by_sport']['⚽ Футбол']} — {'✅' if sports_enabled['football'] else '❌'}",
         f"  🏀 Баскетбол: {stats['by_sport']['🏀 Баскетбол']} — {'✅' if sports_enabled['basketball'] else '❌'}",
         f"  🎾 Теніс: {stats['by_sport']['🎾 Теніс']} — {'✅' if sports_enabled['tennis'] else '❌'}\n",
+        "📡 *Залишок запитів (сьогодні):*",
+        f"  ⚽ Футбол: {fl}/100 {'⚠️' if fl < 20 else ''}",
+        f"  🏀 Баскетбол: {bl}/100 {'⚠️' if bl < 20 else ''}",
+        f"  🎾 Теніс: {tl}/100 {'⚠️' if tl < 20 else ''}\n",
         "📋 *Активні ліги:*",
         f"  ⚽ {', '.join(f_leagues) if f_leagues else 'немає'}",
         f"  🏀 {', '.join(b_leagues) if b_leagues else 'немає'}",
@@ -311,6 +331,7 @@ async def fetch_football_live(session, league_id):
     url = f"https://v3.football.api-sports.io/fixtures?live=all&league={league_id}"
     try:
         async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+            track_request("football")
             return (await r.json()).get("response", [])
     except:
         return []
@@ -321,6 +342,7 @@ async def fetch_prematch_odds(session, fixture_id):
     url = f"https://v3.football.api-sports.io/odds?fixture={fixture_id}&bookmaker=6"
     try:
         async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+            track_request("football")
             data = (await r.json()).get("response", [])
             if data:
                 for bet in data[0].get("bookmakers", [{}])[0].get("bets", []):
@@ -339,6 +361,7 @@ async def fetch_basketball_live(session, league_id):
     url = f"https://v1.basketball.api-sports.io/games?league={league_id}&live=all"
     try:
         async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+            track_request("basketball")
             return (await r.json()).get("response", [])
     except:
         return []
@@ -348,6 +371,7 @@ async def fetch_tennis_live(session, league_id):
     url = f"https://v1.tennis.api-sports.io/games?league={league_id}&live=all"
     try:
         async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+            track_request("tennis")
             return (await r.json()).get("response", [])
     except:
         return []
@@ -502,42 +526,4 @@ async def scan(session):
     await scan_tennis(session)
     print(f"  Сигналів всього: {stats['signals_total']}")
 
-# ── MAIN ──────────────────────────────────────────────────────────────────
-async def main():
-    print("=" * 50)
-    print("  FavTracker Bot — Футбол + Баскетбол + Теніс")
-    print("=" * 50)
-
-    async with aiohttp.ClientSession() as session:
-        await send_msg(session,
-            "✅ *FavTracker запущено\\!*\n\n"
-            "Відстежую:\n"
-            "⚽ Футбол \\(MLS, Бразилія, Аргентина та ін\\.\\)\n"
-            "🏀 Баскетбол \\(NBA, Євроліга\\)\n"
-            "🎾 Теніс \\(ATP, WTA, Grand Slam\\)\n\n"
-            f"⏱ Скан кожні {POLL_INTERVAL // 60} хвилин"
-        )
-
-        async def command_loop(session):
-    while True:
-        try:
-            await process_commands(session)
-        except Exception as e:
-            print(f"[CMD ERROR] {e}")
-        await asyncio.sleep(2)
-
-async def scan_loop(session):
-    while True:
-        try:
-            await scan(session)
-        except Exception as e:
-            print(f"[SCAN ERROR] {e}")
-        await asyncio.sleep(POLL_INTERVAL if is_running else 10)
-
-await asyncio.gather(
-    command_loop(session),
-    scan_loop(session),
-)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# ── MAIN ─
