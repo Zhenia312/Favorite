@@ -1,22 +1,25 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ── КОНФІГ ────────────────────────────────────────────────────────────────
 TG_TOKEN   = os.environ.get("TG_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 API_KEY    = os.environ.get("API_KEY", "")
 
-POLL_INTERVAL = 300  # 5 хвилин між сканами (економія запитів)
+POLL_INTERVAL = 300
+
+KYIV_TZ = timezone(timedelta(hours=3))
+
+def now_kyiv():
+    return datetime.now(timezone.utc).astimezone(KYIV_TZ)
 
 # ── ФУТБОЛ ────────────────────────────────────────────────────────────────
-FOOTBALL_ENABLED   = True
 FAV_THRESHOLD_FOOT = 1.80
 MIN_ODDS_RISE_FOOT = 35
 MAX_MINUTE_FOOT    = 75
-FOOTBALL_LEAGUES   = [253, 71, 32, 98, 188, 262, 128, 9, 667]
-FOOTBALL_NAMES     = {
+FOOTBALL_LEAGUES   = {
     253: "🇺🇸 MLS",
     71:  "🇧🇷 Бразилія",
     32:  "🌍 Відбір ЧС 2026",
@@ -24,30 +27,22 @@ FOOTBALL_NAMES     = {
     188: "🇦🇺 A-League",
     262: "🇲🇽 Ліга МХ",
     128: "🇦🇷 Аргентина",
-    9:   "🤝 Товариські (збірні)",
-    667: "🤝 Товариські (клуби)",
+    9:   "🤝 Тов. збірні",
+    667: "🤝 Тов. клуби",
 }
 
 # ── БАСКЕТБОЛ ─────────────────────────────────────────────────────────────
-BASKETBALL_ENABLED    = True
-FAV_THRESHOLD_BASK    = 1.60
-MIN_ODDS_RISE_BASK    = 30
-MIN_POINTS_BEHIND     = 8   # фаворит програє мінімум 8 очок
-MIN_QUARTER_BASK      = 2   # не раніше 2-ї чверті
-MAX_QUARTER_BASK      = 3   # не пізніше 3-ї чверті
-BASKETBALL_LEAGUES    = [12, 120, 117]  # NBA, Євроліга, NCAAm
-BASKETBALL_NAMES      = {
+FAV_THRESHOLD_BASK = 1.60
+MIN_POINTS_BEHIND  = 8
+BASKETBALL_LEAGUES = {
     12:  "🏀 NBA",
     120: "🏀 Євроліга",
     117: "🏀 NCAA",
 }
 
 # ── ТЕНІС ─────────────────────────────────────────────────────────────────
-TENNIS_ENABLED     = True
-FAV_THRESHOLD_TEN  = 1.60
-MIN_ODDS_RISE_TEN  = 40
-TENNIS_LEAGUES     = [1, 2, 3, 4]  # ATP, WTA, Grand Slam, Challenger
-TENNIS_NAMES       = {
+FAV_THRESHOLD_TEN = 1.60
+TENNIS_LEAGUES    = {
     1: "🎾 ATP",
     2: "🎾 WTA",
     3: "🎾 Grand Slam",
@@ -59,39 +54,97 @@ notified   = set()
 pre_odds   = {}
 is_running = True
 offset     = 0
+
+sports_enabled = {
+    "football":   True,
+    "basketball": True,
+    "tennis":     True,
+}
+
+leagues_enabled = {
+    "football":   {lid: True for lid in FOOTBALL_LEAGUES},
+    "basketball": {lid: True for lid in BASKETBALL_LEAGUES},
+    "tennis":     {lid: True for lid in TENNIS_LEAGUES},
+}
+
+user_state = {
+    "menu": None
+}
+
 stats = {
     "signals_total": 0,
-    "scans_total": 0,
-    "started_at": datetime.now().strftime("%H:%M %d.%m.%Y"),
-    "last_signal": None,
+    "scans_total":   0,
+    "started_at":    now_kyiv().strftime("%H:%M %d.%m.%Y"),
+    "last_signal":   None,
     "by_sport": {"⚽ Футбол": 0, "🏀 Баскетбол": 0, "🎾 Теніс": 0},
 }
 
+# ── КЛАВІАТУРИ ────────────────────────────────────────────────────────────
+def main_keyboard():
+    f = "✅" if sports_enabled["football"]   else "❌"
+    b = "✅" if sports_enabled["basketball"] else "❌"
+    t = "✅" if sports_enabled["tennis"]     else "❌"
+    return {
+        "keyboard": [
+            [{"text": "▶️ Старт"}, {"text": "⏹ Стоп"}],
+            [{"text": "📊 Статистика"}],
+            [{"text": f"{f} Футбол"}, {"text": f"{b} Баскетбол"}, {"text": f"{t} Теніс"}],
+            [{"text": "⚙️ Ліги футбол"}, {"text": "⚙️ Ліги баскет"}, {"text": "⚙️ Ліги теніс"}],
+            [{"text": f"⏱ Інтервал: {POLL_INTERVAL // 60} хв"}],
+        ],
+        "resize_keyboard": True,
+        "persistent": True,
+    }
+
+def interval_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "1 хв"}, {"text": "2 хв"}, {"text": "3 хв"}],
+            [{"text": "5 хв"}, {"text": "10 хв"}],
+            [{"text": "🔙 Назад"}],
+        ],
+        "resize_keyboard": True,
+        "persistent": True,
+    }
+
+def leagues_keyboard(sport):
+    if sport == "football":
+        leagues = FOOTBALL_LEAGUES
+    elif sport == "basketball":
+        leagues = BASKETBALL_LEAGUES
+    else:
+        leagues = TENNIS_LEAGUES
+
+    rows = []
+    items = list(leagues.items())
+    for i in range(0, len(items), 2):
+        row = []
+        for lid, name in items[i:i+2]:
+            icon = "✅" if leagues_enabled[sport][lid] else "❌"
+            row.append({"text": f"{icon} {name}"})
+        rows.append(row)
+    rows.append([{"text": "✅ Всі"}, {"text": "❌ Жодної"}])
+    rows.append([{"text": "🔙 Назад"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "persistent": True,
+    }
+
 # ── TELEGRAM ──────────────────────────────────────────────────────────────
-async def send_msg(session, text, keyboard=True):
+async def send_msg(session, text, kb=None):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TG_CHAT_ID,
-        "text": text,
+        "chat_id":    TG_CHAT_ID,
+        "text":       text,
         "parse_mode": "Markdown",
     }
-    if keyboard:
-        payload["reply_markup"] = main_keyboard()
+    payload["reply_markup"] = kb if kb else main_keyboard()
     try:
         async with session.post(url, json=payload) as r:
             return await r.json()
     except Exception as e:
         print(f"[TG ERROR] {e}")
-
-def main_keyboard():
-    return {
-        "keyboard": [
-            [{"text": "▶️ Старт"}, {"text": "⏹ Стоп"}],
-            [{"text": "📊 Статистика"}],
-        ],
-        "resize_keyboard": True,
-        "persistent": True,
-    }
 
 async def get_updates(session):
     global offset
@@ -103,51 +156,154 @@ async def get_updates(session):
     except:
         return []
 
+# ── ОБРОБКА КОМАНД ────────────────────────────────────────────────────────
 async def process_commands(session):
-    global is_running, offset
+    global is_running, offset, POLL_INTERVAL
     updates = await get_updates(session)
+
     for upd in updates:
         offset = upd["update_id"] + 1
-        text = upd.get("message", {}).get("text", "").strip().lower()
+        raw  = upd.get("message", {}).get("text", "").strip()
+        text = raw.lower()
+        menu = user_state["menu"]
 
+        # ── Режим вибору інтервалу ────────────────────────────────────────
+        if menu == "set_interval":
+            if text == "🔙 назад":
+                user_state["menu"] = None
+                await send_msg(session, "🏠 Головне меню")
+                continue
+
+            interval_map = {
+                "1 хв": 1, "2 хв": 2, "3 хв": 3,
+                "5 хв": 5, "10 хв": 10,
+            }
+            if text in interval_map:
+                minutes = interval_map[text]
+                POLL_INTERVAL = minutes * 60
+                user_state["menu"] = None
+                await send_msg(session, f"✅ *Інтервал змінено на {minutes} хв*")
+            else:
+                await send_msg(session, "Натисни одну з кнопок ⬇️", kb=interval_keyboard())
+            continue
+
+        # ── Режим вибору ліг ──────────────────────────────────────────────
+        if menu in ["football_leagues", "basketball_leagues", "tennis_leagues"]:
+            sport = menu.replace("_leagues", "")
+
+            if text == "🔙 назад":
+                user_state["menu"] = None
+                await send_msg(session, "🏠 Головне меню")
+                continue
+
+            if text in ["✅ всі", "всі"]:
+                for lid in leagues_enabled[sport]:
+                    leagues_enabled[sport][lid] = True
+                await send_msg(session, "✅ Всі ліги увімкнено", kb=leagues_keyboard(sport))
+                continue
+
+            if text in ["❌ жодної", "жодної"]:
+                for lid in leagues_enabled[sport]:
+                    leagues_enabled[sport][lid] = False
+                await send_msg(session, "❌ Всі ліги вимкнено", kb=leagues_keyboard(sport))
+                continue
+
+            if sport == "football":
+                leagues = FOOTBALL_LEAGUES
+            elif sport == "basketball":
+                leagues = BASKETBALL_LEAGUES
+            else:
+                leagues = TENNIS_LEAGUES
+
+            matched = False
+            for lid, name in leagues.items():
+                clean_name = name.split(" ", 1)[-1].lower().strip()
+                if clean_name in text:
+                    leagues_enabled[sport][lid] = not leagues_enabled[sport][lid]
+                    icon = "✅" if leagues_enabled[sport][lid] else "❌"
+                    await send_msg(session, f"{icon} {name}", kb=leagues_keyboard(sport))
+                    matched = True
+                    break
+
+            if not matched:
+                await send_msg(session, "Натисни кнопку ліги", kb=leagues_keyboard(sport))
+            continue
+
+        # ── Головне меню ──────────────────────────────────────────────────
         if text in ["/start", "▶️ старт"]:
             is_running = True
             await send_msg(session, "▶️ *Сканування запущено!*")
 
         elif text in ["/stop", "⏹ стоп"]:
             is_running = False
-            await send_msg(session, "⏹ *Сканування зупинено.*\nНадішли /start щоб відновити.")
+            await send_msg(session, "⏹ *Сканування зупинено.*")
 
         elif text in ["/stat", "📊 статистика"]:
             await send_stat(session)
 
-        elif text in ["/help", "/menu"]:
+        elif "інтервал" in text or text == "/interval":
+            user_state["menu"] = "set_interval"
             await send_msg(session,
-                "📋 *Команди:*\n\n"
-                "/start — запустити\n"
-                "/stop — зупинити\n"
-                "/stat — статистика"
+                f"⏱ *Поточний інтервал: {POLL_INTERVAL // 60} хв*\n\nВибери новий:",
+                kb=interval_keyboard()
             )
 
+        elif "ліги футбол" in text:
+            user_state["menu"] = "football_leagues"
+            await send_msg(session, "⚙️ *Ліги футболу:*", kb=leagues_keyboard("football"))
+
+        elif "ліги баскет" in text:
+            user_state["menu"] = "basketball_leagues"
+            await send_msg(session, "⚙️ *Ліги баскетболу:*", kb=leagues_keyboard("basketball"))
+
+        elif "ліги теніс" in text:
+            user_state["menu"] = "tennis_leagues"
+            await send_msg(session, "⚙️ *Ліги тенісу:*", kb=leagues_keyboard("tennis"))
+
+        elif "футбол" in text:
+            sports_enabled["football"] = not sports_enabled["football"]
+            icon = "✅" if sports_enabled["football"] else "❌"
+            await send_msg(session, f"{icon} *Футбол {'увімкнено' if sports_enabled['football'] else 'вимкнено'}*")
+
+        elif "баскетбол" in text:
+            sports_enabled["basketball"] = not sports_enabled["basketball"]
+            icon = "✅" if sports_enabled["basketball"] else "❌"
+            await send_msg(session, f"{icon} *Баскетбол {'увімкнено' if sports_enabled['basketball'] else 'вимкнено'}*")
+
+        elif "теніс" in text:
+            sports_enabled["tennis"] = not sports_enabled["tennis"]
+            icon = "✅" if sports_enabled["tennis"] else "❌"
+            await send_msg(session, f"{icon} *Теніс {'увімкнено' if sports_enabled['tennis'] else 'вимкнено'}*")
+
+# ── СТАТИСТИКА ────────────────────────────────────────────────────────────
 async def send_stat(session):
+    f_leagues = [n for lid, n in FOOTBALL_LEAGUES.items()   if leagues_enabled["football"][lid]]
+    b_leagues = [n for lid, n in BASKETBALL_LEAGUES.items() if leagues_enabled["basketball"][lid]]
+    t_leagues = [n for lid, n in TENNIS_LEAGUES.items()     if leagues_enabled["tennis"][lid]]
+
     lines = [
         "📊 *Статистика FavTracker*\n",
         f"🕐 Запущено: {stats['started_at']}",
         f"🔍 Сканів: {stats['scans_total']}",
         f"🚨 Сигналів: {stats['signals_total']}",
         f"⚡ Статус: {'▶️ Активний' if is_running else '⏹ Зупинений'}",
-        f"⏱ Інтервал: {POLL_INTERVAL // 60} хв",
+        f"⏱ Інтервал: {POLL_INTERVAL // 60} хв\n",
+        "🏆 *По видах спорту:*",
+        f"  ⚽ Футбол: {stats['by_sport']['⚽ Футбол']} — {'✅' if sports_enabled['football'] else '❌'}",
+        f"  🏀 Баскетбол: {stats['by_sport']['🏀 Баскетбол']} — {'✅' if sports_enabled['basketball'] else '❌'}",
+        f"  🎾 Теніс: {stats['by_sport']['🎾 Теніс']} — {'✅' if sports_enabled['tennis'] else '❌'}\n",
+        "📋 *Активні ліги:*",
+        f"  ⚽ {', '.join(f_leagues) if f_leagues else 'немає'}",
+        f"  🏀 {', '.join(b_leagues) if b_leagues else 'немає'}",
+        f"  🎾 {', '.join(t_leagues) if t_leagues else 'немає'}",
     ]
     if stats["last_signal"]:
         lines.append(f"\n📌 Останній: {stats['last_signal']}")
-    lines.append("\n🏆 *По видах спорту:*")
-    for sport, count in stats["by_sport"].items():
-        lines.append(f"  {sport}: {count}")
     await send_msg(session, "\n".join(lines))
 
 def add_signal(sport_key, description):
     stats["signals_total"] += 1
-    stats["last_signal"] = f"{description} ({datetime.now().strftime('%H:%M')})"
+    stats["last_signal"] = f"{description} ({now_kyiv().strftime('%H:%M')})"
     stats["by_sport"][sport_key] = stats["by_sport"].get(sport_key, 0) + 1
 
 # ── ФУТБОЛ API ────────────────────────────────────────────────────────────
@@ -206,9 +362,11 @@ def strength(rise, strong_rise=60, good_rise=40):
 
 # ── СКАНУВАННЯ ФУТБОЛ ─────────────────────────────────────────────────────
 async def scan_football(session):
-    if not FOOTBALL_ENABLED:
+    if not sports_enabled["football"]:
         return
-    for league_id in FOOTBALL_LEAGUES:
+    for league_id, league_name in FOOTBALL_LEAGUES.items():
+        if not leagues_enabled["football"][league_id]:
+            continue
         fixtures = await fetch_football_live(session, league_id)
         await asyncio.sleep(1)
         for fix in fixtures:
@@ -218,7 +376,6 @@ async def scan_football(session):
             away    = fix["teams"]["away"]["name"]
             score_h = fix["goals"].get("home") or 0
             score_a = fix["goals"].get("away") or 0
-            league  = FOOTBALL_NAMES.get(league_id, "")
 
             if minute > MAX_MINUTE_FOOT:
                 continue
@@ -248,7 +405,7 @@ async def scan_football(session):
 
             msg = (
                 f"🚨 *СИГНАЛ: ФАВОРИТ ПРОГРАЄ*\n\n"
-                f"⚽ {league}\n"
+                f"⚽ {league_name}\n"
                 f"*{home}* {score_h}:{score_a} *{away}*\n"
                 f"⏱ Хвилина: {minute}'\n"
                 f"📉 Коеф до матчу: `{pre_odd}`\n"
@@ -260,9 +417,11 @@ async def scan_football(session):
 
 # ── СКАНУВАННЯ БАСКЕТБОЛ ──────────────────────────────────────────────────
 async def scan_basketball(session):
-    if not BASKETBALL_ENABLED:
+    if not sports_enabled["basketball"]:
         return
-    for league_id in BASKETBALL_LEAGUES:
+    for league_id, league_name in BASKETBALL_LEAGUES.items():
+        if not leagues_enabled["basketball"][league_id]:
+            continue
         games = await fetch_basketball_live(session, league_id)
         await asyncio.sleep(1)
         for game in games:
@@ -272,13 +431,10 @@ async def scan_basketball(session):
             score_h = game.get("scores", {}).get("home", {}).get("total") or 0
             score_a = game.get("scores", {}).get("away", {}).get("total") or 0
             quarter = game.get("status", {}).get("short", "")
-            league  = BASKETBALL_NAMES.get(league_id, "")
 
-            # Тільки 2-3 чверть
             if quarter not in ["Q2", "Q3"]:
                 continue
 
-            # Фаворит програє мінімум 8 очок
             diff = score_h - score_a
             if diff > -MIN_POINTS_BEHIND:
                 continue
@@ -291,7 +447,7 @@ async def scan_basketball(session):
 
             msg = (
                 f"🚨 *СИГНАЛ: ФАВОРИТ ПРОГРАЄ*\n\n"
-                f"🏀 {league}\n"
+                f"🏀 {league_name}\n"
                 f"*{home}* {score_h}:{score_a} *{away}*\n"
                 f"📍 Чверть: {quarter}\n"
                 f"📊 Різниця: {abs(diff)} очок\n"
@@ -302,9 +458,11 @@ async def scan_basketball(session):
 
 # ── СКАНУВАННЯ ТЕНІС ──────────────────────────────────────────────────────
 async def scan_tennis(session):
-    if not TENNIS_ENABLED:
+    if not sports_enabled["tennis"]:
         return
-    for league_id in TENNIS_LEAGUES:
+    for league_id, league_name in TENNIS_LEAGUES.items():
+        if not leagues_enabled["tennis"][league_id]:
+            continue
         games = await fetch_tennis_live(session, league_id)
         await asyncio.sleep(1)
         for game in games:
@@ -313,9 +471,7 @@ async def scan_tennis(session):
             away   = game.get("players", {}).get("away", {}).get("name", "")
             sets_h = game.get("scores", {}).get("home", {}).get("sets") or 0
             sets_a = game.get("scores", {}).get("away", {}).get("sets") or 0
-            league = TENNIS_NAMES.get(league_id, "")
 
-            # Фаворит програв перший сет (рахунок 0:1)
             if not (sets_h == 0 and sets_a == 1):
                 continue
 
@@ -327,7 +483,7 @@ async def scan_tennis(session):
 
             msg = (
                 f"🚨 *СИГНАЛ: ФАВОРИТ ПРОГРАЄ СЕТ*\n\n"
-                f"🎾 {league}\n"
+                f"🎾 {league_name}\n"
                 f"*{home}* {sets_h}:{sets_a} *{away}*\n"
                 f"📍 Фаворит програв перший сет\n"
                 f"💡 Перевір live коефіцієнт на букмекері"
@@ -340,7 +496,7 @@ async def scan(session):
     if not is_running:
         return
     stats["scans_total"] += 1
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Скан #{stats['scans_total']}...")
+    print(f"[{now_kyiv().strftime('%H:%M:%S')}] Скан #{stats['scans_total']}...")
     await scan_football(session)
     await scan_basketball(session)
     await scan_tennis(session)
@@ -368,7 +524,6 @@ async def main():
                 await scan(session)
             except Exception as e:
                 print(f"[ERROR] {e}")
-            await asyncio.sleep(POLL_INTERVAL)
+            await asyncio.sleep(POLL_INTERVAL if is_running else 10)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == "__main__"
