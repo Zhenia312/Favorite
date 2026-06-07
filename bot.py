@@ -518,13 +518,26 @@ async def main():
             f"⏱ Скан кожні {POLL_INTERVAL // 60} хвилин"
         )
 
-        while True:
-            try:
-                await process_commands(session)
-                await scan(session)
-            except Exception as e:
-                print(f"[ERROR] {e}")
-            await asyncio.sleep(POLL_INTERVAL if is_running else 10)
+        async def command_loop(session):
+    while True:
+        try:
+            await process_commands(session)
+        except Exception as e:
+            print(f"[CMD ERROR] {e}")
+        await asyncio.sleep(2)
+
+async def scan_loop(session):
+    while True:
+        try:
+            await scan(session)
+        except Exception as e:
+            print(f"[SCAN ERROR] {e}")
+        await asyncio.sleep(POLL_INTERVAL if is_running else 10)
+
+await asyncio.gather(
+    command_loop(session),
+    scan_loop(session),
+)
 
 if __name__ == "__main__":
     asyncio.run(main())
