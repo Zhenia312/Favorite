@@ -145,7 +145,8 @@ async def send_msg(session, text, kb=None):
     }
     payload["reply_markup"] = kb if kb else main_keyboard()
     try:
-        async with session.post(url, json=payload) as r:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.post(url, json=payload, timeout=timeout) as r:
             return await r.json()
     except Exception as e:
         print(f"[TG ERROR] {e}")
@@ -154,7 +155,12 @@ async def get_updates(session):
     global offset
     url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
     try:
-        async with session.get(url, params={"offset": offset, "timeout": 3}) as r:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with session.get(
+            url,
+            params={"offset": offset, "timeout": 3},
+            timeout=timeout
+        ) as r:
             data = await r.json()
             return data.get("result", [])
     except:
@@ -330,7 +336,8 @@ def add_signal(sport_key, description):
 async def fetch_football_live(session, league_id):
     url = f"https://v3.football.api-sports.io/fixtures?live=all&league={league_id}"
     try:
-        async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("football")
             return (await r.json()).get("response", [])
     except:
@@ -341,7 +348,8 @@ async def fetch_prematch_odds(session, fixture_id):
         return pre_odds[fixture_id]
     url = f"https://v3.football.api-sports.io/odds?fixture={fixture_id}&bookmaker=6"
     try:
-        async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("football")
             data = (await r.json()).get("response", [])
             if data:
@@ -360,7 +368,8 @@ async def fetch_prematch_odds(session, fixture_id):
 async def fetch_basketball_live(session, league_id):
     url = f"https://v1.basketball.api-sports.io/games?league={league_id}&live=all"
     try:
-        async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("basketball")
             return (await r.json()).get("response", [])
     except:
@@ -370,7 +379,8 @@ async def fetch_basketball_live(session, league_id):
 async def fetch_tennis_live(session, league_id):
     url = f"https://v1.tennis.api-sports.io/games?league={league_id}&live=all"
     try:
-        async with session.get(url, headers={"x-apisports-key": API_KEY}) as r:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("tennis")
             return (await r.json()).get("response", [])
     except:
@@ -526,4 +536,46 @@ async def scan(session):
     await scan_tennis(session)
     print(f"  Сигналів всього: {stats['signals_total']}")
 
-# ── MAIN ─
+# ── MAIN ──────────────────────────────────────────────────────────────────
+async def main():
+    print("=" * 50)
+    print("  FavTracker Bot — Футбол + Баскетбол + Теніс")
+    print("=" * 50)
+
+    async with aiohttp.ClientSession() as session:
+        await send_msg(session,
+            "✅ *FavTracker запущено\\!*\n\n"
+            "Відстежую:\n"
+            "⚽ Футбол \\(MLS, Бразилія, Аргентина та ін\\.\\)\n"
+            "🏀 Баскетбол \\(NBA, Євроліга\\)\n"
+            "🎾 Теніс \\(ATP, WTA, Grand Slam\\)\n\n"
+            f"⏱ Скан кожні {POLL_INTERVAL // 60} хвилин"
+        )
+
+        async def command_loop():
+            while True:
+                try:
+                    await asyncio.wait_for(process_commands(session), timeout=8)
+                except asyncio.TimeoutError:
+                    print("[CMD TIMEOUT] пропускаємо")
+                except Exception as e:
+                    print(f"[CMD ERROR] {e}")
+                await asyncio.sleep(2)
+
+        async def scan_loop():
+            while True:
+                try:
+                    await asyncio.wait_for(scan(session), timeout=120)
+                except asyncio.TimeoutError:
+                    print("[SCAN TIMEOUT] скан завис, пропускаємо")
+                except Exception as e:
+                    print(f"[SCAN ERROR] {e}")
+                await asyncio.sleep(POLL_INTERVAL if is_running else 10)
+
+        await asyncio.gather(
+            command_loop(),
+            scan_loop(),
+        )
+
+if __name__ == "__main__":
+    asyncio.run(main())
