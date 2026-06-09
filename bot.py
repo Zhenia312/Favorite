@@ -41,9 +41,9 @@ BASKETBALL_LEAGUES = {
 }
 
 # ── ТЕНІС ─────────────────────────────────────────────────────────────────
-FAV_THRESHOLD_TEN  = 1.60
-MIN_ODDS_RISE_TEN  = 40
-TENNIS_LEAGUES     = {
+FAV_THRESHOLD_TEN = 1.60
+MIN_ODDS_RISE_TEN = 40
+TENNIS_LEAGUES    = {
     1: "🎾 ATP",
     2: "🎾 WTA",
     3: "🎾 Grand Slam",
@@ -51,10 +51,10 @@ TENNIS_LEAGUES     = {
 }
 
 # ── ХОКЕЙ ─────────────────────────────────────────────────────────────────
-FAV_THRESHOLD_HOCK  = 1.70
-MIN_ODDS_RISE_HOCK  = 30
-MIN_GOALS_BEHIND_HOCK = 2   # фаворит програє мінімум 2 голи
-HOCKEY_LEAGUES      = {
+FAV_THRESHOLD_HOCK    = 1.70
+MIN_ODDS_RISE_HOCK    = 30
+MIN_GOALS_BEHIND_HOCK = 2
+HOCKEY_LEAGUES        = {
     57:  "🏒 NHL",
     92:  "🏒 KHL",
     96:  "🏒 Ліга чемпіонів",
@@ -381,7 +381,7 @@ async def fetch_football_live(session, league_id):
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("football")
             return (await r.json()).get("response", [])
-    except:
+    except Exception:
         return []
 
 async def fetch_prematch_odds_football(session, fixture_id):
@@ -401,7 +401,7 @@ async def fetch_prematch_odds_football(session, fixture_id):
                                 odd = float(v.get("odd", 0))
                                 pre_odds[fixture_id] = odd
                                 return odd
-    except:
+    except Exception:
         pass
     return None
 
@@ -413,7 +413,7 @@ async def fetch_basketball_live(session, league_id):
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("basketball")
             return (await r.json()).get("response", [])
-    except:
+    except Exception:
         return []
 
 # ── ТЕНІС API ─────────────────────────────────────────────────────────────
@@ -424,7 +424,7 @@ async def fetch_tennis_live(session, league_id):
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("tennis")
             return (await r.json()).get("response", [])
-    except:
+    except Exception:
         return []
 
 async def fetch_prematch_odds_tennis(session, game_id):
@@ -445,7 +445,7 @@ async def fetch_prematch_odds_tennis(session, game_id):
                                 odd = float(v.get("odd", 0))
                                 pre_odds[key] = odd
                                 return odd
-    except:
+    except Exception:
         pass
     return None
 
@@ -457,7 +457,7 @@ async def fetch_hockey_live(session, league_id):
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("hockey")
             return (await r.json()).get("response", [])
-    except:
+    except Exception:
         return []
 
 async def fetch_prematch_odds_hockey(session, game_id):
@@ -478,7 +478,7 @@ async def fetch_prematch_odds_hockey(session, game_id):
                                 odd = float(v.get("odd", 0))
                                 pre_odds[key] = odd
                                 return odd
-    except:
+    except Exception:
         pass
     return None
 
@@ -520,4 +520,3 @@ async def scan_football(session):
             for bet_block in fix.get("odds", []):
                 for v in bet_block.get("values", []):
                     if v.get("value") == "Home":
-                        try: live_odd 
