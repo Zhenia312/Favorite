@@ -670,6 +670,32 @@ async def fetch_prematch_odds_football(session, fixture_id):
         print(f"    [ODDS⚽ ERROR] {e}")
     return None
 
+# ── LIVE ODDS ФУТБОЛ ──────────────────────────────────────────────────────
+async def fetch_live_odds_football(session, fixture_id):
+    """Окремий запит live odds — тільки для матчів що пройшли фільтр рахунку."""
+    url = f"https://v3.football.api-sports.io/odds/live?fixture={fixture_id}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+            track_request("football")
+            data = (await r.json()).get("response", [])
+            print(f"    [LIVE ODDS⚽] fixture={fixture_id} response={len(data)} записів")
+            if not data:
+                print(f"    [LIVE ODDS⚽] ❌ порожня відповідь")
+                return None
+            for bookmaker in data[0].get("odds", []):
+                for bet in bookmaker.get("bets", []):
+                    if bet.get("name") in ["Match Winner", "1X2"]:
+                        for v in bet.get("values", []):
+                            if v.get("value") in ["Home", "1"]:
+                                odd = float(v.get("odd", 0))
+                                print(f"    [LIVE ODDS⚽] ✅ live_odd={odd}")
+                                return odd
+            print(f"    [LIVE ODDS⚽] ❌ 'Match Winner' не знайдено в live odds")
+    except Exception as e:
+        print(f"    [LIVE ODDS⚽ ERROR] {e}")
+    return None
+
 # ── БАСКЕТБОЛ API ─────────────────────────────────────────────────────────
 async def fetch_basketball_live(session, league_id=None):
     if league_id:
@@ -830,14 +856,18 @@ async def _process_football_fixtures(session, fixtures, league_map):
             print(f"    → пропуск: рахунок {score_h}:{score_a} не підходить і не 0:0 у 2-му таймі")
             continue
 
-        live_odd = pre_odd
-        for bet_block in fix.get("odds", []):
-            for v in bet_block.get("values", []):
-                if v.get("value") == "Home":
-                    try:
-                        live_odd = float(v["odd"])
-                    except Exception:
-                        pass
+        # Спочатку пробуємо live odds (окремий запит)
+        live_odd = await fetch_live_odds_football(session, fid)
+        if live_odd is None:
+            # Якщо live odds недоступні — беремо з тіла /fixtures (зазвичай порожньо)
+            live_odd = pre_odd
+            for bet_block in fix.get("odds", []):
+                for v in bet_block.get("values", []):
+                    if v.get("value") == "Home":
+                        try:
+                            live_odd = float(v["odd"])
+                        except Exception:
+                            pass
 
         rise = round(((live_odd - pre_odd) / pre_odd) * 100)
         print(f"    → pre_odd={pre_odd} live_odd={live_odd} rise={rise}% (мін={MIN_ODDS_RISE_FOOT}%)")
@@ -922,6 +952,31 @@ async def fetch_prematch_odds_basketball(session, game_id):
         pass
     return None
 
+async def fetch_live_odds_basketball(session, game_id):
+    """Live odds для баскетболу — тільки для матчів що пройшли фільтр."""
+    url = f"https://v1.basketball.api-sports.io/odds/live?game={game_id}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+            track_request("basketball")
+            data = (await r.json()).get("response", [])
+            print(f"    [LIVE ODDS🏀] game={game_id} response={len(data)} записів")
+            if not data:
+                print(f"    [LIVE ODDS🏀] ❌ порожня відповідь")
+                return None
+            for bookmaker in data[0].get("odds", []):
+                for bet in bookmaker.get("bets", []):
+                    if bet.get("name") in ["Home/Away", "Match Winner", "Winner"]:
+                        for v in bet.get("values", []):
+                            if v.get("value") in ["Home", "1"]:
+                                odd = float(v.get("odd", 0))
+                                print(f"    [LIVE ODDS🏀] ✅ live_odd={odd}")
+                                return odd
+            print(f"    [LIVE ODDS🏀] ❌ не знайдено")
+    except Exception as e:
+        print(f"    [LIVE ODDS🏀 ERROR] {e}")
+    return None
+
 async def _process_basketball_games(session, games, default_league_name):
     print(f"  [🏀 СКАН] Матчів отримано: {len(games)}")
     for game in games:
@@ -953,23 +1008,31 @@ async def _process_basketball_games(session, games, default_league_name):
             print(f"    → пропуск: pre_odd={pre_odd} >= порогу {FAV_THRESHOLD_BASK}")
             continue
 
+        live_odd = await fetch_live_odds_basketball(session, gid)
+        if live_odd is None:
+            live_odd = pre_odd
+        rise = round(((live_odd - pre_odd) / pre_odd) * 100)
+        print(f"    → pre_odd={pre_odd} live_odd={live_odd} rise={rise}%")
+
         key = f"bask_{gid}_{score_h}_{score_a}"
         if key in notified:
             continue
         notified.add(key)
         add_signal("🏀 Баскетбол", f"{home} {score_h}:{score_a} {away}")
 
+        rise_str = f" \\(+{rise}%\\)" if rise > 0 else ""
         msg = (
             f"🚨 *СИГНАЛ: ФАВОРИТ ПРОГРАЄ*\n\n"
             f"🏀 {league_name}\n"
             f"*{home}* {score_h}:{score_a} *{away}*\n"
             f"📍 Чверть: {quarter}\n"
             f"📉 Коеф до матчу: `{pre_odd}`\n"
+            f"📈 Коеф зараз: `{live_odd}`{rise_str}\n"
             f"📊 Різниця: {abs(diff)} очок\n"
             f"💪 {strength(abs(diff), 15, 10)}"
         )
         await send_msg(session, msg)
-        print(f"  🏀 СИГНАЛ: {home} {score_h}:{score_a} {away} чв.{quarter}")
+        print(f"  🏀 СИГНАЛ: {home} {score_h}:{score_a} {away} чв.{quarter} +{rise}%")
 
 # ── СКАНУВАННЯ ТЕНІС ──────────────────────────────────────────────────────
 async def scan_tennis(session):
@@ -1043,6 +1106,31 @@ async def scan_hockey(session):
             await asyncio.sleep(1)
             await _process_hockey_games(session, games, league_name)
 
+async def fetch_live_odds_hockey(session, game_id):
+    """Live odds для хокею — тільки для матчів що пройшли фільтр."""
+    url = f"https://v1.hockey.api-sports.io/odds/live?game={game_id}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+            track_request("hockey")
+            data = (await r.json()).get("response", [])
+            print(f"    [LIVE ODDS🏒] game={game_id} response={len(data)} записів")
+            if not data:
+                print(f"    [LIVE ODDS🏒] ❌ порожня відповідь")
+                return None
+            for bookmaker in data[0].get("odds", []):
+                for bet in bookmaker.get("bets", []):
+                    if bet.get("name") in ["Home/Away", "Match Winner", "Winner", "3Way Result"]:
+                        for v in bet.get("values", []):
+                            if v.get("value") in ["Home", "1"]:
+                                odd = float(v.get("odd", 0))
+                                print(f"    [LIVE ODDS🏒] ✅ live_odd={odd}")
+                                return odd
+            print(f"    [LIVE ODDS🏒] ❌ не знайдено")
+    except Exception as e:
+        print(f"    [LIVE ODDS🏒 ERROR] {e}")
+    return None
+
 async def _process_hockey_games(session, games, default_league_name):
     print(f"  [🏒 СКАН] Матчів отримано: {len(games)}")
     for game in games:
@@ -1074,17 +1162,21 @@ async def _process_hockey_games(session, games, default_league_name):
             print(f"    → пропуск: різниця {diff} (потрібно < -{MIN_GOALS_BEHIND_HOCK})")
             continue
 
-        live_odd = pre_odd
-        for bet_block in game.get("odds", []):
-            for v in bet_block.get("values", []):
-                if v.get("value") == "Home":
-                    try:
-                        live_odd = float(v["odd"])
-                    except Exception:
-                        pass
+        live_odd = await fetch_live_odds_hockey(session, gid)
+        if live_odd is None:
+            live_odd = pre_odd
+            for bet_block in game.get("odds", []):
+                for v in bet_block.get("values", []):
+                    if v.get("value") == "Home":
+                        try:
+                            live_odd = float(v["odd"])
+                        except Exception:
+                            pass
 
         rise = round(((live_odd - pre_odd) / pre_odd) * 100)
+        print(f"    → pre_odd={pre_odd} live_odd={live_odd} rise={rise}% (мін={MIN_ODDS_RISE_HOCK}%)")
         if rise < MIN_ODDS_RISE_HOCK:
+            print(f"    → пропуск: ріст {rise}% < мінімум {MIN_ODDS_RISE_HOCK}%")
             continue
 
         key = f"hock_{gid}_{score_h}_{score_a}"
