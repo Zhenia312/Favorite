@@ -635,8 +635,16 @@ async def fetch_football_live(session, league_id=None):
         timeout = aiohttp.ClientTimeout(total=15)
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("football")
-            return (await r.json()).get("response", [])
-    except Exception:
+            raw = await r.json()
+            results = raw.get("response", [])
+            errors = raw.get("errors", [])
+            total = raw.get("results", 0)
+            print(f"  [API⚽] status={r.status} results={total} errors={errors} len={len(results)}")
+            if r.status != 200:
+                print(f"  [API⚽] ❌ HTTP {r.status}: {raw}")
+            return results
+    except Exception as e:
+        print(f"  [API⚽ ERROR] {e}")
         return []
 
 async def fetch_prematch_odds_football(session, fixture_id):
@@ -706,8 +714,16 @@ async def fetch_basketball_live(session, league_id=None):
         timeout = aiohttp.ClientTimeout(total=15)
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("basketball")
-            return (await r.json()).get("response", [])
-    except Exception:
+            raw = await r.json()
+            results = raw.get("response", [])
+            errors = raw.get("errors", [])
+            total = raw.get("results", 0)
+            print(f"  [API🏀] status={r.status} results={total} errors={errors} len={len(results)}")
+            if r.status != 200:
+                print(f"  [API🏀] ❌ HTTP {r.status}: {raw}")
+            return results
+    except Exception as e:
+        print(f"  [API🏀 ERROR] {e}")
         return []
 
 # ── ТЕНІС API ─────────────────────────────────────────────────────────────
@@ -756,8 +772,16 @@ async def fetch_hockey_live(session, league_id=None):
         timeout = aiohttp.ClientTimeout(total=15)
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("hockey")
-            return (await r.json()).get("response", [])
-    except Exception:
+            raw = await r.json()
+            results = raw.get("response", [])
+            errors = raw.get("errors", [])
+            total = raw.get("results", 0)
+            print(f"  [API🏒] status={r.status} results={total} errors={errors} len={len(results)}")
+            if r.status != 200:
+                print(f"  [API🏒] ❌ HTTP {r.status}: {raw}")
+            return results
+    except Exception as e:
+        print(f"  [API🏒 ERROR] {e}")
         return []
 
 async def fetch_prematch_odds_hockey(session, game_id):
