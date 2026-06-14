@@ -705,11 +705,14 @@ async def fetch_live_odds_football(session, fixture_id):
     return None
 
 # ── БАСКЕТБОЛ API ─────────────────────────────────────────────────────────
+BASK_SEASON = "2024-2025"  # поточний сезон для basketball API
+
 async def fetch_basketball_live(session, league_id=None):
+    # Basketball API вимагає season + live=true (не live=all)
     if league_id:
-        url = f"https://v1.basketball.api-sports.io/games?league={league_id}&live=all"
+        url = f"https://v1.basketball.api-sports.io/games?league={league_id}&season={BASK_SEASON}&live=true"
     else:
-        url = "https://v1.basketball.api-sports.io/games?live=all"
+        url = f"https://v1.basketball.api-sports.io/games?season={BASK_SEASON}&live=true"
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
@@ -719,8 +722,8 @@ async def fetch_basketball_live(session, league_id=None):
             errors = raw.get("errors", [])
             total = raw.get("results", 0)
             print(f"  [API🏀] status={r.status} results={total} errors={errors} len={len(results)}")
-            if r.status != 200:
-                print(f"  [API🏀] ❌ HTTP {r.status}: {raw}")
+            if errors:
+                print(f"  [API🏀] ⚠️ errors: {errors}")
             return results
     except Exception as e:
         print(f"  [API🏀 ERROR] {e}")
@@ -763,11 +766,14 @@ async def fetch_prematch_odds_tennis(session, game_id):
     return None
 
 # ── ХОКЕЙ API ─────────────────────────────────────────────────────────────
+HOCK_SEASON = "2024-2025"  # поточний сезон для hockey API
+
 async def fetch_hockey_live(session, league_id=None):
+    # Hockey API вимагає season + live=true (не live=all)
     if league_id:
-        url = f"https://v1.hockey.api-sports.io/games?league={league_id}&live=all"
+        url = f"https://v1.hockey.api-sports.io/games?league={league_id}&season={HOCK_SEASON}&live=true"
     else:
-        url = "https://v1.hockey.api-sports.io/games?live=all"
+        url = f"https://v1.hockey.api-sports.io/games?season={HOCK_SEASON}&live=true"
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
@@ -777,8 +783,8 @@ async def fetch_hockey_live(session, league_id=None):
             errors = raw.get("errors", [])
             total = raw.get("results", 0)
             print(f"  [API🏒] status={r.status} results={total} errors={errors} len={len(results)}")
-            if r.status != 200:
-                print(f"  [API🏒] ❌ HTTP {r.status}: {raw}")
+            if errors:
+                print(f"  [API🏒] ⚠️ errors: {errors}")
             return results
     except Exception as e:
         print(f"  [API🏒 ERROR] {e}")
