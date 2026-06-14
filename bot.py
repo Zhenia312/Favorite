@@ -206,6 +206,8 @@ async def get_updates(session):
 
 # ── ЛІЧИЛЬНИК ЗАПИТІВ ─────────────────────────────────────────────────────
 _last_reset_day = now_kyiv().day
+_quota_warned   = set()   # спорти, для яких вже надіслано попередження
+_quota_paused   = set()   # спорти, для яких скан призупинено через 0 запитів
 
 def reset_counters_if_needed():
     global _last_reset_day
@@ -213,8 +215,15 @@ def reset_counters_if_needed():
     if today != _last_reset_day:
         for sport in api_requests:
             api_requests[sport]["used"] = 0
+        had_paused = list(_quota_paused)
+        _quota_warned.clear()
+        _quota_paused.clear()
         _last_reset_day = today
         print(f"[{now_kyiv().strftime('%H:%M:%S')}] Лічильники запитів скинуто (новий день)")
+        # Повідомлення надсилається асинхронно — тут тільки логуємо
+        # (session недоступна в sync контексті, повідомлення в scan_loop)
+        if had_paused:
+            print(f"[QUOTA] Поновлено спорти: {had_paused}")
 
 def track_request(sport):
     reset_counters_if_needed()
@@ -223,6 +232,34 @@ def track_request(sport):
 def requests_left(sport):
     r = api_requests[sport]
     return max(0, r["limit"] - r["used"])
+
+async def check_quota(session, sport, sport_label):
+    """Повертає False якщо запитів не залишилось — скан треба пропустити."""
+    left = requests_left(sport)
+    if left == 0:
+        if sport not in _quota_paused:
+            _quota_paused.add(sport)
+            now_str = now_kyiv().strftime("%H:%M")
+            msg = (
+                "🚫 *" + sport_label + ": запити вичерпано!*\n\n"
+                "Ліміт 100 запитів на сьогодні витрачено.\n"
+                "Скан *" + sport_label + "* призупинено до опівночі.\n"
+                "⏰ Поновиться автоматично о 00:00 (Київ).\n"
+                "🕐 Зараз: " + now_str
+            )
+            await send_msg(session, msg)
+            print(f"[QUOTA] {sport} — запити вичерпано, скан призупинено")
+        return False
+    if left <= 20 and sport not in _quota_warned:
+        _quota_warned.add(sport)
+        msg = (
+            "⚠️ *" + sport_label + ": залишилось мало запитів!*\n\n"
+            "Залишок: *" + str(left) + "/100*\n"
+            "Розглянь збільшення інтервалу або вимкнення спорту."
+        )
+        await send_msg(session, msg)
+        print(f"[QUOTA] {sport} — попередження: залишилось {left} запитів")
+    return True
 
 # ── ОБРОБКА КОМАНД ────────────────────────────────────────────────────────
 async def process_commands(session):
@@ -611,16 +648,26 @@ async def fetch_prematch_odds_football(session, fixture_id):
         async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
             track_request("football")
             data = (await r.json()).get("response", [])
+            print(f"    [ODDS⚽] fixture={fixture_id} response={len(data)} записів")
             if data:
-                for bet in data[0].get("bookmakers", [{}])[0].get("bets", []):
-                    if bet.get("name") == "Match Winner":
-                        for v in bet.get("values", []):
-                            if v.get("value") == "Home":
-                                odd = float(v.get("odd", 0))
-                                pre_odds[fixture_id] = odd
-                                return odd
-    except Exception:
-        pass
+                bookmakers = data[0].get("bookmakers", [])
+                print(f"    [ODDS⚽] букмекерів: {len(bookmakers)}")
+                if bookmakers:
+                    bet_names = [b.get("name") for b in bookmakers[0].get("bets", [])]
+                    print(f"    [ODDS⚽] типи ставок: {bet_names}")
+                    for bet in bookmakers[0].get("bets", []):
+                        if bet.get("name") == "Match Winner":
+                            for v in bet.get("values", []):
+                                if v.get("value") == "Home":
+                                    odd = float(v.get("odd", 0))
+                                    pre_odds[fixture_id] = odd
+                                    print(f"    [ODDS⚽] ✅ знайдено odd={odd}")
+                                    return odd
+                    print(f"    [ODDS⚽] ❌ 'Match Winner' не знайдено")
+            else:
+                print(f"    [ODDS⚽] ❌ порожня відповідь (немає odds для цього матчу)")
+    except Exception as e:
+        print(f"    [ODDS⚽ ERROR] {e}")
     return None
 
 # ── БАСКЕТБОЛ API ─────────────────────────────────────────────────────────
@@ -721,6 +768,8 @@ def strength(rise, strong_rise=60, good_rise=40):
 async def scan_football(session):
     if not sports_enabled["football"]:
         return
+    if not await check_quota(session, "football", "⚽ Футбол"):
+        return
 
     if all_leagues_mode["football"]:
         # Один запит — всі live матчі без фільтра
@@ -741,6 +790,7 @@ async def scan_football(session):
             await _process_football_fixtures(session, fixtures, {league_id: league_name})
 
 async def _process_football_fixtures(session, fixtures, league_map):
+    print(f"  [⚽ СКАН] Матчів отримано: {len(fixtures)}")
     for fix in fixtures:
         fid        = fix["fixture"]["id"]
         league_id  = fix.get("league", {}).get("id")
@@ -751,11 +801,18 @@ async def _process_football_fixtures(session, fixtures, league_map):
         score_h    = fix["goals"].get("home") or 0
         score_a    = fix["goals"].get("away") or 0
 
+        print(f"  [⚽] {home} {score_h}:{score_a} {away} | хв={minute} | ліга={league_name}")
+
         if minute > MAX_MINUTE_FOOT:
+            print(f"    → пропуск: хвилина {minute} > {MAX_MINUTE_FOOT}")
             continue
 
         pre_odd = await fetch_prematch_odds_football(session, fid)
-        if not pre_odd or pre_odd >= FAV_THRESHOLD_FOOT:
+        if not pre_odd:
+            print(f"    → пропуск: odds не знайдено")
+            continue
+        if pre_odd >= FAV_THRESHOLD_FOOT:
+            print(f"    → пропуск: pre_odd={pre_odd} >= порогу {FAV_THRESHOLD_FOOT}")
             continue
         # Сигнал 1: фаворит програє по рахунку
         valid_score = (
@@ -770,6 +827,7 @@ async def _process_football_fixtures(session, fixtures, league_map):
         is_00_second_half = (score_h == 0 and score_a == 0 and 46 <= minute <= MAX_MINUTE_FOOT)
 
         if not valid_score and not is_00_second_half:
+            print(f"    → пропуск: рахунок {score_h}:{score_a} не підходить і не 0:0 у 2-му таймі")
             continue
 
         live_odd = pre_odd
@@ -782,7 +840,9 @@ async def _process_football_fixtures(session, fixtures, league_map):
                         pass
 
         rise = round(((live_odd - pre_odd) / pre_odd) * 100)
+        print(f"    → pre_odd={pre_odd} live_odd={live_odd} rise={rise}% (мін={MIN_ODDS_RISE_FOOT}%)")
         if rise < MIN_ODDS_RISE_FOOT:
+            print(f"    → пропуск: ріст {rise}% < мінімум {MIN_ODDS_RISE_FOOT}%")
             continue
 
         if is_00_second_half and not valid_score:
@@ -825,6 +885,8 @@ async def _process_football_fixtures(session, fixtures, league_map):
 async def scan_basketball(session):
     if not sports_enabled["basketball"]:
         return
+    if not await check_quota(session, "basketball", "🏀 Баскетбол"):
+        return
 
     if all_leagues_mode["basketball"]:
         games = await fetch_basketball_live(session)
@@ -861,6 +923,7 @@ async def fetch_prematch_odds_basketball(session, game_id):
     return None
 
 async def _process_basketball_games(session, games, default_league_name):
+    print(f"  [🏀 СКАН] Матчів отримано: {len(games)}")
     for game in games:
         gid         = game.get("id")
         league_name = default_league_name or game.get("league", {}).get("name", "")
@@ -870,15 +933,24 @@ async def _process_basketball_games(session, games, default_league_name):
         score_a     = game.get("scores", {}).get("away", {}).get("total") or 0
         quarter     = game.get("status", {}).get("short", "")
 
+        print(f"  [🏀] {home} {score_h}:{score_a} {away} | чверть={quarter}")
+
         if quarter not in ["Q2", "Q3", "Q4"]:
+            print(f"    → пропуск: чверть {quarter} не підходить")
             continue
 
         diff = score_h - score_a
         if diff > -MIN_POINTS_BEHIND:
+            print(f"    → пропуск: різниця {diff} (потрібно < -{MIN_POINTS_BEHIND})")
             continue
 
         pre_odd = await fetch_prematch_odds_basketball(session, gid)
-        if not pre_odd or pre_odd >= FAV_THRESHOLD_BASK:
+        print(f"    → pre_odd={pre_odd}")
+        if not pre_odd:
+            print(f"    → пропуск: odds не знайдено")
+            continue
+        if pre_odd >= FAV_THRESHOLD_BASK:
+            print(f"    → пропуск: pre_odd={pre_odd} >= порогу {FAV_THRESHOLD_BASK}")
             continue
 
         key = f"bask_{gid}_{score_h}_{score_a}"
@@ -902,6 +974,8 @@ async def _process_basketball_games(session, games, default_league_name):
 # ── СКАНУВАННЯ ТЕНІС ──────────────────────────────────────────────────────
 async def scan_tennis(session):
     if not sports_enabled["tennis"]:
+        return
+    if not await check_quota(session, "tennis", "🎾 Теніс"):
         return
 
     if all_leagues_mode["tennis"]:
@@ -954,6 +1028,8 @@ async def _process_tennis_games(session, games, default_league_name):
 async def scan_hockey(session):
     if not sports_enabled["hockey"]:
         return
+    if not await check_quota(session, "hockey", "🏒 Хокей"):
+        return
 
     if all_leagues_mode["hockey"]:
         games = await fetch_hockey_live(session)
@@ -968,6 +1044,7 @@ async def scan_hockey(session):
             await _process_hockey_games(session, games, league_name)
 
 async def _process_hockey_games(session, games, default_league_name):
+    print(f"  [🏒 СКАН] Матчів отримано: {len(games)}")
     for game in games:
         gid         = game.get("id")
         league_name = default_league_name or game.get("league", {}).get("name", "")
@@ -977,15 +1054,24 @@ async def _process_hockey_games(session, games, default_league_name):
         score_a     = game.get("scores", {}).get("away") or 0
         period      = game.get("status", {}).get("short", "")
 
+        print(f"  [🏒] {home} {score_h}:{score_a} {away} | період={period}")
+
         if period not in ["P1", "P2", "P3"]:
+            print(f"    → пропуск: період {period} не підходить")
             continue
 
         pre_odd = await fetch_prematch_odds_hockey(session, gid)
-        if not pre_odd or pre_odd >= FAV_THRESHOLD_HOCK:
+        print(f"    → pre_odd={pre_odd}")
+        if not pre_odd:
+            print(f"    → пропуск: odds не знайдено")
+            continue
+        if pre_odd >= FAV_THRESHOLD_HOCK:
+            print(f"    → пропуск: pre_odd={pre_odd} >= порогу {FAV_THRESHOLD_HOCK}")
             continue
 
         diff = score_h - score_a
         if diff > -MIN_GOALS_BEHIND_HOCK:
+            print(f"    → пропуск: різниця {diff} (потрібно < -{MIN_GOALS_BEHIND_HOCK})")
             continue
 
         live_odd = pre_odd
@@ -1058,9 +1144,30 @@ async def main():
                     print(f"[CMD ERROR] {e}")
                 await asyncio.sleep(2)
 
+        _prev_paused = set()
+
         async def scan_loop():
+            nonlocal _prev_paused
             while True:
                 try:
+                    # Перевіряємо чи скинувся ліміт і були призупинені спорти
+                    reset_counters_if_needed()
+                    newly_resumed = _prev_paused - _quota_paused
+                    if newly_resumed:
+                        sport_labels = {
+                            "football": "⚽ Футбол",
+                            "basketball": "🏀 Баскетбол",
+                            "tennis": "🎾 Теніс",
+                            "hockey": "🏒 Хокей",
+                        }
+                        labels = ", ".join(sport_labels.get(s, s) for s in newly_resumed)
+                        msg = (
+                            "✅ *Ліміт запитів поновлено!*\n\n"
+                            "Новий день — 100 запитів на кожен спорт.\n"
+                            "Скан поновлено: " + labels
+                        )
+                        await send_msg(session, msg)
+                    _prev_paused = set(_quota_paused)
                     await asyncio.wait_for(scan(session), timeout=120)
                 except asyncio.TimeoutError:
                     print("[SCAN TIMEOUT] скан завис, пропускаємо")
