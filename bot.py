@@ -511,13 +511,13 @@ async def send_leagues_info(session):
         except Exception:
             return []
 
-    foot_data  = await fetch_leagues("https://v3.football.api-sports.io/leagues", "football")
+    foot_data  = await fetch_leagues("https://v3.football.api-sports.io/leagues?current=true", "football")
     await asyncio.sleep(1)
-    bask_data  = await fetch_leagues("https://v1.basketball.api-sports.io/leagues", "basketball")
+    bask_data  = await fetch_leagues("https://v1.basketball.api-sports.io/leagues?current=true", "basketball")
     await asyncio.sleep(1)
-    hock_data  = await fetch_leagues("https://v1.hockey.api-sports.io/leagues", "hockey")
+    hock_data  = await fetch_leagues("https://v1.hockey.api-sports.io/leagues?current=true", "hockey")
     await asyncio.sleep(1)
-    ten_data   = await fetch_leagues("https://v1.tennis.api-sports.io/leagues", "tennis")
+    ten_data   = await fetch_leagues("https://v1.tennis.api-sports.io/leagues?current=true", "tennis")
 
     foot_live  = [l for l in foot_data  if l.get("seasons") and any(s.get("coverage", {}).get("fixtures", {}).get("live") for s in l.get("seasons", []))]
     bask_live  = [l for l in bask_data  if l.get("seasons") and any(s.get("coverage", {}).get("live") for s in l.get("seasons", []))]
