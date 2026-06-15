@@ -92,7 +92,7 @@ all_leagues_mode = {
 user_state = {"menu": None}
 
 api_requests = {
-    "football":   {"used": 0, "limit": 100},
+    "football":   {"used": 0, "limit": 7500},
     "basketball": {"used": 0, "limit": 100},
     "tennis":     {"used": 0, "limit": 100},
     "hockey":     {"used": 0, "limit": 100},
