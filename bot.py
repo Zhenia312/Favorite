@@ -385,18 +385,22 @@ async def send_leagues_info(session):
         await send_msg(session, f"❌ Помилка: {e}")
         return
 
-    live_leagues = [
+    current_leagues = [
         l for l in leagues
-        if any(
-            s.get("coverage", {}).get("fixtures", {}).get("live")
-            for s in l.get("seasons", [])
-        )
+        if any(s.get("current") for s in l.get("seasons", []))
+    ]
+    our_active = [
+        name for lid, name in FOOTBALL_LEAGUES.items()
+        if leagues_enabled["football"][lid]
     ]
     lines = [
         "📋 *Доступні ліги через ваш API ключ*\n",
-        f"⚽ Всього активних ліг: *{len(leagues)}*",
-        f"📡 З підтримкою live: *{len(live_leagues)}*",
-        f"\n⚠️ Витрачено 1 запит",
+        f"⚽ Всього ліг у відповіді: *{len(leagues)}*",
+        f"📅 З активним поточним сезоном: *{len(current_leagues)}*",
+        f"\n🎯 *Наші активні ліги ({len(our_active)}):*",
+        "\n".join(f"  • {n}" for n in our_active) or "  немає",
+        f"\n💡 Live доступність — перевір через «🔍 Діагностика»",
+        f"⚠️ Витрачено 1 запит",
     ]
     if errors:
         lines.append(f"\n❌ Помилка API: {errors}")
