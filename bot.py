@@ -505,14 +505,14 @@ async def fetch_prematch_odds_football(session, fixture_id):
     url = f"https://v3.football.api-sports.io/odds?fixture={fixture_id}&bookmaker=6"
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-       async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
-    track_request("football")
+        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+            track_request("football")
 
-    raw = await r.json()
-    print(f"[ODDS RAW] fixture={fixture_id}")
-    print(raw)
+            raw = await r.json()
+            print(f"[ODDS RAW] fixture={fixture_id}")
+            print(raw)
 
-    data = raw.get("response", [])
+            data       = raw.get("response", [])
             print(f"    [ODDS⚽] fixture={fixture_id} response={len(data)} записів")
             if not data:
                 print(f"    [ODDS⚽] ❌ порожня відповідь")
