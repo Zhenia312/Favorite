@@ -20,31 +20,13 @@ FAV_THRESHOLD_FOOT = 2.20
 MIN_ODDS_RISE_FOOT = 20
 MAX_MINUTE_FOOT    = 85
 
-FOOTBALL_LEAGUES = {
-    253: "🇺🇸 MLS",
-    71:  "🇧🇷 Бразилія",
-    32:  "🌍 Відбір ЧС 2026",
-    98:  "🇯🇵 J-League",
-    188: "🇦🇺 A-League",
-    262: "🇲🇽 Ліга МХ",
-    128: "🇦🇷 Аргентина",
-    9:   "🤝 Тов. збірні",
-    667: "🤝 Тов. клуби",
-}
-
 # ── СТАН ──────────────────────────────────────────────────────────────────
-notified   = {}   # key -> timestamp, для очищення старих записів
+notified   = {}   # key -> timestamp
 pre_odds   = {}   # fixture_id -> pre-match odd (кеш)
 is_running = True
 offset     = 0
 
-sports_enabled = {"football": True}
-
-leagues_enabled = {
-    "football": {lid: True for lid in FOOTBALL_LEAGUES},
-}
-
-all_leagues_mode = {"football": False}
+football_enabled = True
 
 user_state = {"menu": None}
 
@@ -62,14 +44,13 @@ stats = {
 
 # ── КЛАВІАТУРИ ────────────────────────────────────────────────────────────
 def main_keyboard():
-    f = "✅" if sports_enabled["football"] else "❌"
+    f = "✅" if football_enabled else "❌"
     return {
         "keyboard": [
             [{"text": "▶️ Старт"}, {"text": "⏹ Стоп"}],
             [{"text": "📊 Статистика"}, {"text": "🔍 Діагностика"}],
-            [{"text": f"{f} Футбол"}],
-            [{"text": "⚙️ Ліги футбол"}],
-            [{"text": "📋 Ліги API"}, {"text": "📅 Розклад"}],
+            [{"text": f"{f} Футбол (всі ліги)"}],
+            [{"text": "📅 Розклад"}],
             [{"text": f"⏱ Інтервал: {POLL_INTERVAL // 60} хв"}],
         ],
         "resize_keyboard": True,
@@ -83,26 +64,6 @@ def interval_keyboard():
             [{"text": "5 хв"}, {"text": "10 хв"}],
             [{"text": "🔙 Назад"}],
         ],
-        "resize_keyboard": True,
-        "persistent": True,
-    }
-
-def leagues_keyboard():
-    all_mode = all_leagues_mode["football"]
-    all_icon = "🌍✅" if all_mode else "🌍❌"
-    rows = []
-    items = list(FOOTBALL_LEAGUES.items())
-    for i in range(0, len(items), 2):
-        row = []
-        for lid, name in items[i:i+2]:
-            icon = "✅" if leagues_enabled["football"][lid] else "❌"
-            row.append({"text": f"{icon} {name}"})
-        rows.append(row)
-    rows.append([{"text": f"{all_icon} Всі ліги API"}])
-    rows.append([{"text": "✅ Всі"}, {"text": "❌ Жодної"}])
-    rows.append([{"text": "🔙 Назад"}])
-    return {
-        "keyboard": rows,
         "resize_keyboard": True,
         "persistent": True,
     }
@@ -165,42 +126,40 @@ def requests_left(sport):
     r = api_requests[sport]
     return max(0, r["limit"] - r["used"])
 
-async def check_quota(session, sport, sport_label):
-    left  = requests_left(sport)
-    limit = api_requests[sport]["limit"]
+async def check_quota(session):
+    left  = requests_left("football")
+    limit = api_requests["football"]["limit"]
     warn_threshold = max(20, int(limit * 0.05))
 
     if left == 0:
-        if sport not in _quota_paused:
-            _quota_paused.add(sport)
-            now_str = now_kyiv().strftime("%H:%M")
+        if "football" not in _quota_paused:
+            _quota_paused.add("football")
             await send_msg(session,
-                f"🚫 *{sport_label}: запити вичерпано!*\n\n"
+                f"🚫 *Запити вичерпано!*\n\n"
                 f"Ліміт {limit} запитів на сьогодні витрачено.\n"
                 f"Скан призупинено до 00:00 (Київ).\n"
-                f"🕐 Зараз: {now_str}"
+                f"🕐 Зараз: {now_kyiv().strftime('%H:%M')}"
             )
-            print(f"[QUOTA] {sport} — вичерпано, призупинено")
+            print(f"[QUOTA] вичерпано, призупинено")
         return False
 
-    if left <= warn_threshold and sport not in _quota_warned:
-        _quota_warned.add(sport)
+    if left <= warn_threshold and "football" not in _quota_warned:
+        _quota_warned.add("football")
         await send_msg(session,
-            f"⚠️ *{sport_label}: залишилось мало запитів!*\n\n"
+            f"⚠️ *Залишилось мало запитів!*\n\n"
             f"Залишок: *{left}/{limit}*\n"
             f"Розглянь збільшення інтервалу."
         )
-        print(f"[QUOTA] {sport} — попередження: залишилось {left}")
+        print(f"[QUOTA] попередження: залишилось {left}")
     return True
 
 # ── ОЧИЩЕННЯ СТАРИХ ДАНИХ ─────────────────────────────────────────────────
 def cleanup_old_data():
     now_ts = now_kyiv().timestamp()
-    cutoff = 12 * 3600  # 12 годин
+    cutoff = 12 * 3600
     old_keys = [k for k, ts in notified.items() if now_ts - ts > cutoff]
     for k in old_keys:
         del notified[k]
-    # Обмежуємо розмір кешу odds
     if len(pre_odds) > 1000:
         for k in list(pre_odds.keys())[:500]:
             del pre_odds[k]
@@ -209,7 +168,7 @@ def cleanup_old_data():
 
 # ── ОБРОБКА КОМАНД ────────────────────────────────────────────────────────
 async def process_commands(session):
-    global is_running, offset, POLL_INTERVAL
+    global is_running, offset, POLL_INTERVAL, football_enabled
     updates = await get_updates(session)
 
     for upd in updates:
@@ -233,55 +192,6 @@ async def process_commands(session):
                 await send_msg(session, "Натисни одну з кнопок ⬇️", kb=interval_keyboard())
             continue
 
-        # ── Вибір ліг ─────────────────────────────────────────────────────
-        if menu == "football_leagues":
-            if text == "🔙 назад":
-                user_state["menu"] = None
-                await send_msg(session, "🏠 Головне меню")
-                continue
-
-            if "всі ліги api" in text:
-                all_leagues_mode["football"] = not all_leagues_mode["football"]
-                if all_leagues_mode["football"]:
-                    await send_msg(session,
-                        "🌍 *Режим «Всі ліги API» увімкнено*\n"
-                        "Бот сканує всі live матчі без фільтра.\n"
-                        f"⚠️ 1 запит на скан замість {len(leagues_enabled['football'])}",
-                        kb=leagues_keyboard()
-                    )
-                else:
-                    await send_msg(session,
-                        "🌍 *Режим «Всі ліги API» вимкнено*\n"
-                        "Повернено фільтр по обраних лігах.",
-                        kb=leagues_keyboard()
-                    )
-                continue
-
-            if text in ["✅ всі", "всі"]:
-                for lid in leagues_enabled["football"]:
-                    leagues_enabled["football"][lid] = True
-                await send_msg(session, "✅ Всі ліги увімкнено", kb=leagues_keyboard())
-                continue
-
-            if text in ["❌ жодної", "жодної"]:
-                for lid in leagues_enabled["football"]:
-                    leagues_enabled["football"][lid] = False
-                await send_msg(session, "❌ Всі ліги вимкнено", kb=leagues_keyboard())
-                continue
-
-            matched = False
-            for lid, name in FOOTBALL_LEAGUES.items():
-                clean_name = name.split(" ", 1)[-1].lower().strip()
-                if clean_name in text:
-                    leagues_enabled["football"][lid] = not leagues_enabled["football"][lid]
-                    icon = "✅" if leagues_enabled["football"][lid] else "❌"
-                    await send_msg(session, f"{icon} {name}", kb=leagues_keyboard())
-                    matched = True
-                    break
-            if not matched:
-                await send_msg(session, "Натисни кнопку ліги", kb=leagues_keyboard())
-            continue
-
         # ── Головне меню ──────────────────────────────────────────────────
         if text in ["/start", "▶️ старт"]:
             is_running = True
@@ -297,9 +207,6 @@ async def process_commands(session):
         elif "діагностика" in text:
             await send_diagnostics(session)
 
-        elif "ліги api" in text:
-            await send_leagues_info(session)
-
         elif "розклад" in text:
             await send_schedule(session)
 
@@ -310,14 +217,10 @@ async def process_commands(session):
                 kb=interval_keyboard()
             )
 
-        elif "ліги футбол" in text:
-            user_state["menu"] = "football_leagues"
-            await send_msg(session, "⚙️ *Ліги футболу:*", kb=leagues_keyboard())
-
         elif "футбол" in text:
-            sports_enabled["football"] = not sports_enabled["football"]
-            icon = "✅" if sports_enabled["football"] else "❌"
-            state = "увімкнено" if sports_enabled["football"] else "вимкнено"
+            football_enabled = not football_enabled
+            icon  = "✅" if football_enabled else "❌"
+            state = "увімкнено" if football_enabled else "вимкнено"
             await send_msg(session, f"{icon} *Футбол {state}*")
 
 # ── РОЗКЛАД ───────────────────────────────────────────────────────────────
@@ -332,7 +235,7 @@ async def send_schedule(session):
             timeout=timeout
         ) as r:
             track_request("football")
-            data = await r.json()
+            data     = await r.json()
             fixtures = data.get("response", [])
             errors   = data.get("errors", {})
             print(f"[РОЗКЛАД] date={today} results={data.get('results',0)} errors={errors}")
@@ -345,8 +248,7 @@ async def send_schedule(session):
         try:
             dt_str = fix.get("fixture", {}).get("date", "")
             if "T" in dt_str:
-                utc_hour  = int(dt_str[11:13])
-                kyiv_hour = (utc_hour + 3) % 24
+                kyiv_hour = (int(dt_str[11:13]) + 3) % 24
                 hours[kyiv_hour] = hours.get(kyiv_hour, 0) + 1
         except Exception:
             continue
@@ -357,50 +259,9 @@ async def send_schedule(session):
     )
     lines = [
         f"📅 *Розклад футболу* ({today}, Київ)\n",
-        f"⚽ Всього матчів: *{len(fixtures)}*\n",
+        f"⚽ Всього матчів сьогодні: *{len(fixtures)}*\n",
         hour_lines,
         f"\n⚠️ Витрачено 1 запит",
-    ]
-    if errors:
-        lines.append(f"\n❌ Помилка API: {errors}")
-    await send_msg(session, "\n".join(lines))
-
-# ── ЛІГИ API ──────────────────────────────────────────────────────────────
-async def send_leagues_info(session):
-    await send_msg(session, "📋 *Запитую доступні ліги...*")
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with session.get(
-            "https://v3.football.api-sports.io/leagues?current=true",
-            headers={"x-apisports-key": API_KEY},
-            timeout=timeout
-        ) as r:
-            track_request("football")
-            data    = await r.json()
-            leagues = data.get("response", [])
-            errors  = data.get("errors", {})
-            results = data.get("results", 0)
-            print(f"[ЛІГИ] status={r.status} results={results} errors={errors}")
-    except Exception as e:
-        await send_msg(session, f"❌ Помилка: {e}")
-        return
-
-    current_leagues = [
-        l for l in leagues
-        if any(s.get("current") for s in l.get("seasons", []))
-    ]
-    our_active = [
-        name for lid, name in FOOTBALL_LEAGUES.items()
-        if leagues_enabled["football"][lid]
-    ]
-    lines = [
-        "📋 *Доступні ліги через ваш API ключ*\n",
-        f"⚽ Всього ліг у відповіді: *{len(leagues)}*",
-        f"📅 З активним поточним сезоном: *{len(current_leagues)}*",
-        f"\n🎯 *Наші активні ліги ({len(our_active)}):*",
-        "\n".join(f"  • {n}" for n in our_active) or "  немає",
-        f"\n💡 Live доступність — перевір через «🔍 Діагностика»",
-        f"⚠️ Витрачено 1 запит",
     ]
     if errors:
         lines.append(f"\n❌ Помилка API: {errors}")
@@ -420,21 +281,35 @@ async def send_diagnostics(session):
             data     = await r.json()
             fixtures = data.get("response", [])
             errors   = data.get("errors", {})
-            results  = data.get("results", 0)
-            print(f"[ДІАГНОСТИКА] status={r.status} results={results} errors={errors} len={len(fixtures)}")
+            print(f"[ДІАГНОСТИКА] status={r.status} results={data.get('results',0)} errors={errors} len={len(fixtures)}")
     except Exception as e:
         await send_msg(session, f"❌ Помилка: {e}")
         return
 
-    fl    = requests_left("football")
+    # Групуємо по лігах для наочності
+    leagues_live = {}
+    for fix in fixtures:
+        lg = fix.get("league", {}).get("name", "Невідома")
+        leagues_live[lg] = leagues_live.get(lg, 0) + 1
+
+    left  = requests_left("football")
     limit = api_requests["football"]["limit"]
     used  = api_requests["football"]["used"]
 
     lines = [
         "🔍 *Діагностика — Live матчі зараз*\n",
-        f"⚽ Футбол: *{len(fixtures)} матчів* в лайві",
-        f"\n📡 Запитів сьогодні: {used}/{limit} (залишок: {fl})",
-        f"⚠️ Витрачено 1 запит на діагностику",
+        f"⚽ Всього в лайві: *{len(fixtures)} матчів*",
+    ]
+    if leagues_live:
+        lines.append("\n*По лігах:*")
+        for lg, cnt in sorted(leagues_live.items(), key=lambda x: -x[1])[:10]:
+            lines.append(f"  • {lg}: {cnt}")
+        if len(leagues_live) > 10:
+            lines.append(f"  ...і ще {len(leagues_live) - 10} ліг")
+
+    lines += [
+        f"\n📡 Запитів сьогодні: {used}/{limit} (залишок: {left})",
+        f"⚠️ Витрачено 1 запит",
     ]
     if errors:
         lines.append(f"\n❌ Помилка API: {errors}")
@@ -442,32 +317,24 @@ async def send_diagnostics(session):
 
 # ── СТАТИСТИКА ────────────────────────────────────────────────────────────
 async def send_stat(session):
-    fl    = requests_left("football")
+    left  = requests_left("football")
     limit = api_requests["football"]["limit"]
     used  = api_requests["football"]["used"]
-
-    active_leagues = [n for lid, n in FOOTBALL_LEAGUES.items() if leagues_enabled["football"][lid]]
-    league_line = (
-        "🌍 Всі ліги API" if all_leagues_mode["football"]
-        else (", ".join(active_leagues) if active_leagues else "немає")
-    )
 
     lines = [
         "📊 *Статистика FavTracker*\n",
         f"🕐 Запущено: {stats['started_at']}",
         f"🔍 Сканів: {stats['scans_total']}",
-        f"🚨 Сигналів всього: {stats['signals_total']}",
-        f"  ⚽ Футбол: {stats['signals_football']}",
+        f"🚨 Сигналів: {stats['signals_total']}",
         f"⚡ Статус: {'▶️ Активний' if is_running else '⏹ Зупинений'}",
-        f"⏱ Інтервал: {POLL_INTERVAL // 60} хв\n",
-        f"⚽ Футбол: {'✅' if sports_enabled['football'] else '❌'}\n",
+        f"⏱ Інтервал: {POLL_INTERVAL // 60} хв",
+        f"⚽ Футбол: {'✅' if football_enabled else '❌'} (всі ліги API)\n",
         "📡 *Запити сьогодні:*",
-        f"  ⚽ використано {used}/{limit}, залишок {fl} {'⚠️' if fl < max(20, int(limit * 0.05)) else ''}",
-        f"\n📋 *Активні ліги:*",
-        f"  {league_line}",
+        f"  використано: {used}/{limit}",
+        f"  залишок: {left} {'⚠️' if left < max(20, int(limit * 0.05)) else ''}",
     ]
     if stats["last_signal"]:
-        lines.append(f"\n📌 Останній: {stats['last_signal']}")
+        lines.append(f"\n📌 Останній сигнал: {stats['last_signal']}")
     await send_msg(session, "\n".join(lines))
 
 def add_signal(description):
@@ -476,15 +343,14 @@ def add_signal(description):
     stats["last_signal"] = f"{description} ({now_kyiv().strftime('%H:%M')})"
 
 # ── ФУТБОЛ API ────────────────────────────────────────────────────────────
-async def fetch_football_live(session, league_id=None):
-    url = (
-        f"https://v3.football.api-sports.io/fixtures?live=all&league={league_id}"
-        if league_id else
-        "https://v3.football.api-sports.io/fixtures?live=all"
-    )
+async def fetch_football_live(session):
     try:
         timeout = aiohttp.ClientTimeout(total=15)
-        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+        async with session.get(
+            "https://v3.football.api-sports.io/fixtures?live=all",
+            headers={"x-apisports-key": API_KEY},
+            timeout=timeout
+        ) as r:
             track_request("football")
             raw     = await r.json()
             results = raw.get("response", [])
@@ -501,24 +367,20 @@ async def fetch_football_live(session, league_id=None):
 async def fetch_prematch_odds_football(session, fixture_id):
     if fixture_id in pre_odds:
         return pre_odds[fixture_id]
-
-    url = f"https://v3.football.api-sports.io/odds?fixture={fixture_id}&bookmaker=6"
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+        async with session.get(
+            f"https://v3.football.api-sports.io/odds?fixture={fixture_id}&bookmaker=6",
+            headers={"x-apisports-key": API_KEY},
+            timeout=timeout
+        ) as r:
             track_request("football")
-
-            raw = await r.json()
-            print(f"[ODDS RAW] fixture={fixture_id}")
-            print(raw)
-
-            data       = raw.get("response", [])
+            data = (await r.json()).get("response", [])
             print(f"    [ODDS⚽] fixture={fixture_id} response={len(data)} записів")
             if not data:
                 print(f"    [ODDS⚽] ❌ порожня відповідь")
                 return None
             bookmakers = data[0].get("bookmakers", [])
-            print(f"    [ODDS⚽] букмекерів: {len(bookmakers)}")
             if not bookmakers:
                 print(f"    [ODDS⚽] ❌ немає букмекерів")
                 return None
@@ -538,10 +400,13 @@ async def fetch_prematch_odds_football(session, fixture_id):
     return None
 
 async def fetch_live_odds_football(session, fixture_id):
-    url = f"https://v3.football.api-sports.io/odds/live?fixture={fixture_id}"
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        async with session.get(url, headers={"x-apisports-key": API_KEY}, timeout=timeout) as r:
+        async with session.get(
+            f"https://v3.football.api-sports.io/odds/live?fixture={fixture_id}",
+            headers={"x-apisports-key": API_KEY},
+            timeout=timeout
+        ) as r:
             track_request("football")
             raw    = await r.json()
             data   = raw.get("response", [])
@@ -579,37 +444,24 @@ def strength(rise, strong_rise=60, good_rise=40):
 
 # ── СКАНУВАННЯ ────────────────────────────────────────────────────────────
 async def scan_football(session):
-    if not sports_enabled["football"]:
+    if not football_enabled:
         print("  [⚽] вимкнено, пропускаємо")
         return
-    if not await check_quota(session, "football", "⚽ Футбол"):
+    if not await check_quota(session):
         return
 
-    if all_leagues_mode["football"]:
-        fixtures = await fetch_football_live(session)
-        await asyncio.sleep(1)
-        league_map = {
-            fix.get("league", {}).get("id"): fix.get("league", {}).get("name", "")
-            for fix in fixtures
-        }
-        await _process_football_fixtures(session, fixtures, league_map)
-    else:
-        for league_id, league_name in FOOTBALL_LEAGUES.items():
-            if not leagues_enabled["football"][league_id]:
-                continue
-            fixtures = await fetch_football_live(session, league_id)
-            await asyncio.sleep(1)
-            await _process_football_fixtures(session, fixtures, {league_id: league_name})
+    fixtures = await fetch_football_live(session)
+    await asyncio.sleep(1)
+    await _process_football_fixtures(session, fixtures)
 
-async def _process_football_fixtures(session, fixtures, league_map):
+async def _process_football_fixtures(session, fixtures):
     total = len(fixtures)
     cnt_minute = cnt_odds = cnt_score = cnt_live = cnt_signals = 0
     print(f"  [⚽ СКАН] Матчів отримано: {total}")
 
     for fix in fixtures:
         fid          = fix["fixture"]["id"]
-        league_id    = fix.get("league", {}).get("id")
-        league_name  = league_map.get(league_id, fix.get("league", {}).get("name", ""))
+        league_name  = fix.get("league", {}).get("name", "")
         minute       = fix["fixture"]["status"].get("elapsed") or 0
         status_short = fix["fixture"]["status"].get("short", "")
         home         = fix["teams"]["home"]["name"]
@@ -617,7 +469,7 @@ async def _process_football_fixtures(session, fixtures, league_map):
         score_h      = fix["goals"].get("home") or 0
         score_a      = fix["goals"].get("away") or 0
 
-        print(f"  [⚽] {home} {score_h}:{score_a} {away} | хв={minute} | статус={status_short}")
+        print(f"  [⚽] {home} {score_h}:{score_a} {away} | хв={minute} | статус={status_short} | ліга={league_name}")
 
         # Фільтр 1: статус і хвилина
         if status_short not in ["1H", "2H", "ET"]:
@@ -640,8 +492,8 @@ async def _process_football_fixtures(session, fixtures, league_map):
             print(f"    → пропуск: pre_odd={pre_odd} >= {FAV_THRESHOLD_FOOT} (не фаворит)")
             continue
 
-        # Фільтр 3: рахунок — фаворит (home) програє
-        home_losing      = score_h < score_a
+        # Фільтр 3: рахунок
+        home_losing       = score_h < score_a
         is_00_second_half = (score_h == 0 and score_a == 0 and minute >= 46)
 
         if not home_losing and not is_00_second_half:
@@ -649,11 +501,11 @@ async def _process_football_fixtures(session, fixtures, league_map):
             print(f"    → пропуск: рахунок {score_h}:{score_a} не підходить")
             continue
 
-        # Фільтр 4: live odds (запит тільки для матчів що пройшли всі фільтри)
+        # Фільтр 4: live odds (тільки якщо пройшли всі попередні фільтри)
         live_odd = await fetch_live_odds_football(session, fid)
         if live_odd is None:
             cnt_live += 1
-            print(f"    → пропуск: live odds недоступні, сигнал не генеруємо")
+            print(f"    → пропуск: live odds недоступні")
             continue
 
         rise = round(((live_odd - pre_odd) / pre_odd) * 100)
@@ -725,14 +577,13 @@ async def scan(session):
 async def main():
     stats["started_at"] = now_kyiv().strftime("%H:%M %d.%m.%Y")
     print("=" * 50)
-    print("  FavTracker Bot — Футбол")
+    print("  FavTracker Bot — Футбол (всі ліги)")
     print("=" * 50)
 
     async with aiohttp.ClientSession() as session:
         await send_msg(session,
             "✅ *FavTracker запущено\\!*\n\n"
-            "Відстежую:\n"
-            "⚽ Футбол \\(MLS, Бразилія, Аргентина та ін\\.\\)\n\n"
+            "⚽ Моніторинг футболу по *всіх лігах* API\n\n"
             f"⏱ Скан кожні {POLL_INTERVAL // 60} хвилин\n"
             f"📡 API ліміт: {api_requests['football']['limit']} запитів/день"
         )
@@ -756,14 +607,11 @@ async def main():
                     reset_counters_if_needed()
                     newly_resumed = _prev_paused - _quota_paused
                     if newly_resumed:
-                        labels = ", ".join(
-                            {"football": "⚽ Футбол"}.get(s, s)
-                            for s in newly_resumed
-                        )
+                        limit = api_requests["football"]["limit"]
                         await send_msg(session,
                             f"✅ *Ліміт запитів поновлено!*\n\n"
-                            f"Новий день — {api_requests['football']['limit']} запитів.\n"
-                            f"Скан поновлено: {labels}"
+                            f"Новий день — {limit} запитів.\n"
+                            f"Сканування поновлено."
                         )
                     _prev_paused = set(_quota_paused)
                     await asyncio.wait_for(scan(session), timeout=120)
