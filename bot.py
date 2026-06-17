@@ -18,46 +18,30 @@ def now_kyiv():
 
 # ── ФУТБОЛ ────────────────────────────────────────────────────────────────
 FAV_THRESHOLD_FOOT = 2.50
-# Якщо сигналів буде недостатньо — підняти до 2.70 (п.1 нового ТЗ)
-# FAV_THRESHOLD_FOOT = 2.70
 MIN_ODDS_RISE_FOOT = 15
 MAX_MINUTE_FOOT    = 90
 
-# Розширення №4 / №5: пороги для сигналів "не виграє" / "без голів"
 NOT_WINNING_MIN_MINUTE  = 60
 NOT_WINNING_FAV_ODD_MAX = 1.80
 
-# Розширення №6: альтернативне визначення фаворита через співвідношення коефіцієнтів
 MIN_ODDS_GAP_RATIO = 2.0
 
-# Нічийні рахунки, які допускаються до перевірки сигналів "не програє/нічия"
-# (п.4, п.12 нового ТЗ)
 DRAW_SCORES_ALLOWED = {0, 1, 2, 3}
 
-# Кешування live odds (п.6 нового ТЗ): не частіше 1 запиту на матч / 60с
 LIVE_CACHE_TTL = 60
-live_odds_cache = {}  # fixture_id -> {"odd": float, "ts": timestamp}
+live_odds_cache = {}
 
-# Кандидати для повторної перевірки наступного циклу, якщо /odds/live
-# повернув порожню відповідь (п.7 нового ТЗ)
 live_odds_retry_candidates = set()
 
-# Статуси матчу що вважаються live.
-# HT прибрано зі сканування за новим ТЗ (п.3): матчі в HT більше навіть
-# не потрапляють до обробки сигналів (раніше HT був у LIVE_STATUSES, але
-# пропускався окремою перевіркою — тепер прибираємо його одразу зі списку).
 LIVE_STATUSES = {"1H", "2H"}
 
-# Ринки odds що перевіряємо (п.1, п.6 ТЗ)
 ODDS_MARKETS = {"Match Winner", "1X2", "Winner", "Full Time Result"}
 
-# TTL кешу pre-match odds — 6 годин (п.5 ТЗ)
 PRE_ODDS_TTL = 6 * 3600
 
 # ── СТАН ──────────────────────────────────────────────────────────────────
-# pre_odds: fixture_id -> {"home": float, "away": float, "ts": timestamp}
 pre_odds   = {}
-notified   = {}   # key -> timestamp
+notified   = {}
 is_running = True
 offset     = 0
 
@@ -77,10 +61,9 @@ stats = {
     "signals_football": 0,
 }
 
-# ── MARKDOWN ЗАХИСТ (п.8 ТЗ) ─────────────────────────────────────────────
+# ── MARKDOWN ЗАХИСТ ───────────────────────────────────────────────────────
 def escape_md(text: str) -> str:
     """Екранує спецсимволи Telegram Markdown v1."""
-    # У Markdown v1 небезпечні: _ * ` [
     for ch in ["_", "*", "`", "["]:
         text = text.replace(ch, f"\\{ch}")
     return text
@@ -184,7 +167,7 @@ async def check_quota(session):
                 f"🚫 *Запити вичерпано!*\n\n"
                 f"Ліміт {limit} запитів на сьогодні витрачено.\n"
                 f"Скан призупинено до 00:00 (Київ).\n"
-                f"🕐 Зараз: {now_kyiv().strftime('%H:%M')}"
+                f"Зараз: {now_kyiv().strftime('%H:%M')}"
             )
             print(f"[QUOTA] вичерпано, призупинено")
         return False
@@ -226,11 +209,10 @@ async def process_commands(session):
         text = raw.lower()
         menu = user_state["menu"]
 
-        # ── Вибір інтервалу ───────────────────────────────────────────────
         if menu == "set_interval":
             if text == "🔙 назад":
                 user_state["menu"] = None
-                await send_msg(session, "🏠 Головне меню")
+                await send_msg(session, "Головне меню")
                 continue
             interval_map = {"1 хв": 1, "2 хв": 2, "3 хв": 3, "5 хв": 5, "10 хв": 10}
             if text in interval_map:
@@ -238,10 +220,9 @@ async def process_commands(session):
                 user_state["menu"] = None
                 await send_msg(session, f"✅ *Інтервал змінено на {interval_map[text]} хв*")
             else:
-                await send_msg(session, "Натисни одну з кнопок ⬇️", kb=interval_keyboard())
+                await send_msg(session, "Натисни одну з кнопок", kb=interval_keyboard())
             continue
 
-        # ── Головне меню ──────────────────────────────────────────────────
         if text in ["/start", "▶️ старт"]:
             is_running = True
             await send_msg(session, "▶️ *Сканування запущено!*")
@@ -289,7 +270,7 @@ async def send_schedule(session):
             errors   = data.get("errors", {})
             print(f"[РОЗКЛАД] date={today} results={data.get('results',0)} errors={errors}")
             if r.status != 200:
-                print(f"[РОЗКЛАД] ⚠️ HTTP {r.status}")
+                print(f"[РОЗКЛАД] HTTP {r.status}")
     except Exception as e:
         await send_msg(session, f"❌ Помилка запиту: {escape_md(str(e))}")
         return
@@ -334,7 +315,7 @@ async def send_diagnostics(session):
             errors   = data.get("errors", {})
             print(f"[ДІАГНОСТИКА] status={r.status} results={data.get('results',0)} errors={errors} len={len(fixtures)}")
             if r.status != 200:
-                print(f"[ДІАГНОСТИКА] ⚠️ HTTP {r.status}: {data}")
+                print(f"[ДІАГНОСТИКА] HTTP {r.status}: {data}")
     except Exception as e:
         await send_msg(session, f"❌ Помилка: {escape_md(str(e))}")
         return
@@ -355,7 +336,7 @@ async def send_diagnostics(session):
     if leagues_live:
         lines.append("\n*По лігах:*")
         for lg, cnt in sorted(leagues_live.items(), key=lambda x: -x[1])[:10]:
-            lines.append(f"  • {escape_md(lg)}: {cnt}")
+            lines.append(f"  - {escape_md(lg)}: {cnt}")
         if len(leagues_live) > 10:
             lines.append(f"  ...і ще {len(leagues_live) - 10} ліг")
 
@@ -375,18 +356,18 @@ async def send_stat(session):
 
     lines = [
         "📊 *Статистика FavTracker*\n",
-        f"🕐 Запущено: {stats['started_at']}",
-        f"🔍 Сканів: {stats['scans_total']}",
-        f"🚨 Сигналів: {stats['signals_total']}",
-        f"⚡ Статус: {'▶️ Активний' if is_running else '⏹ Зупинений'}",
-        f"⏱ Інтервал: {POLL_INTERVAL // 60} хв",
+        f"Запущено: {stats['started_at']}",
+        f"Сканів: {stats['scans_total']}",
+        f"Сигналів: {stats['signals_total']}",
+        f"Статус: {'▶️ Активний' if is_running else '⏹ Зупинений'}",
+        f"Інтервал: {POLL_INTERVAL // 60} хв",
         f"⚽ Футбол: {'✅' if football_enabled else '❌'} (всі ліги API)\n",
         "📡 *Запити сьогодні:*",
         f"  використано: {used}/{limit}",
         f"  залишок: {left} {'⚠️' if left < max(20, int(limit * 0.05)) else ''}",
     ]
     if stats["last_signal"]:
-        lines.append(f"\n📌 Останній сигнал: {escape_md(stats['last_signal'])}")
+        lines.append(f"\nОстанній сигнал: {escape_md(stats['last_signal'])}")
     await send_msg(session, "\n".join(lines))
 
 def add_signal(description):
@@ -410,9 +391,9 @@ async def fetch_football_live(session):
             total   = raw.get("results", 0)
             print(f"  [API⚽] status={r.status} results={total} errors={errors} len={len(results)}")
             if r.status != 200:
-                print(f"  [API⚽] ⚠️ HTTP {r.status}: {raw}")
+                print(f"  [API⚽] HTTP {r.status}: {raw}")
             if errors:
-                print(f"  [API⚽] ⚠️ errors: {errors}")
+                print(f"  [API⚽] errors: {errors}")
             return results
     except Exception as e:
         print(f"  [API⚽ ERROR] {e}")
@@ -423,16 +404,11 @@ def _extract_home_away_odds(data, fixture_id=None):
     Витягує коефіцієнти Home та Away з відповіді /odds або /odds/live.
     Підтримує будь-якого букмекера і всі ринки з ODDS_MARKETS.
     Повертає (home_odd, away_odd) або (None, None).
-
-    Розширення №7: якщо коефіцієнти не знайдено, виводить список доступних
-    bet names для діагностики майбутніх ринків.
     """
     seen_bet_names = set()
 
     for entry in data:
-        # Структура /odds: entry має "bookmakers"
         bookmakers = entry.get("bookmakers", [])
-        # Структура /odds/live: entry має "odds" (список букмекерів)
         if not bookmakers:
             bookmakers = entry.get("odds", [])
 
@@ -459,7 +435,6 @@ def _extract_home_away_odds(data, fixture_id=None):
                     if home_odd is not None and away_odd is not None:
                         return home_odd, away_odd
 
-    # Не вдалось знайти Home/Away ні в одному з відомих ринків (п. Розширення №7)
     if seen_bet_names:
         fid_label = f"fixture={fixture_id} " if fixture_id is not None else ""
         print(f"    [ODDS MARKET] {fid_label}доступні ринки без Home/Away:")
@@ -471,12 +446,10 @@ def _extract_home_away_odds(data, fixture_id=None):
 async def fetch_prematch_odds_football(session, fixture_id):
     """
     Повертає dict {"home": float, "away": float, "fav_side": str, "fav_odd": float}
-    або None якщо odds недоступні.
-    Кешує результат з TTL.
+    або None якщо odds недоступні. Кешує результат з TTL.
     """
     now_ts = now_kyiv().timestamp()
 
-    # Перевіряємо кеш (п.5 ТЗ)
     if fixture_id in pre_odds:
         cached = pre_odds[fixture_id]
         if now_ts - cached.get("ts", 0) < PRE_ODDS_TTL:
@@ -486,7 +459,6 @@ async def fetch_prematch_odds_football(session, fixture_id):
 
     try:
         timeout = aiohttp.ClientTimeout(total=10)
-        # Без bookmaker=6 — беремо будь-якого (п.1 ТЗ)
         async with session.get(
             f"https://v3.football.api-sports.io/odds?fixture={fixture_id}",
             headers={"x-apisports-key": API_KEY},
@@ -499,10 +471,10 @@ async def fetch_prematch_odds_football(session, fixture_id):
             print(f"    [ODDS⚽] fixture={fixture_id} status={r.status} results={len(data)} errors={errors}")
 
             if r.status != 200:
-                print(f"    [ODDS⚽] ⚠️ HTTP {r.status}: {raw}")
+                print(f"    [ODDS⚽] HTTP {r.status}: {raw}")
                 return None
             if errors:
-                print(f"    [ODDS⚽] ⚠️ errors: {errors}")
+                print(f"    [ODDS⚽] errors: {errors}")
             if not data:
                 print(f"    [ODDS⚽] ❌ порожня відповідь")
                 return None
@@ -514,7 +486,6 @@ async def fetch_prematch_odds_football(session, fixture_id):
                 print(f"    [ODDS⚽] ❌ fixture={fixture_id} не вдалось витягти Home/Away odds")
                 return None
 
-            # Визначаємо фаворита (п.2 ТЗ)
             if home_odd <= away_odd:
                 fav_side = "home"
                 fav_odd  = home_odd
@@ -522,10 +493,6 @@ async def fetch_prematch_odds_football(session, fixture_id):
                 fav_side = "away"
                 fav_odd  = away_odd
 
-            # Розширення №6: альтернативне визначення фаворита через gap ratio.
-            # Якщо коефіцієнт фаворита трохи перевищує FAV_THRESHOLD_FOOT, але
-            # розрив між командами достатньо великий — все одно вважаємо
-            # цю сторону фаворитом (позначаємо це окремим прапорцем).
             max_odd = max(home_odd, away_odd)
             min_odd = min(home_odd, away_odd)
             gap_ratio = (max_odd / min_odd) if min_odd > 0 else 0
@@ -552,21 +519,14 @@ async def fetch_prematch_odds_football(session, fixture_id):
 async def fetch_live_odds_football(session, fixture_id, fav_side):
     """
     Повертає live коефіцієнт для сторони фаворита або None.
-
-    П.6 нового ТЗ: кешуємо результат на LIVE_CACHE_TTL секунд, щоб не
-    робити повторний запит до /odds/live для одного матчу частіше ніж
-    раз на хвилину. Кеш зберігає значення для конкретного fav_side —
-    якщо фаворит матчу змінився (теоретично), кеш для цього fixture_id
-    інвалідується.
-
-    П.7 нового ТЗ: якщо відповідь порожня (results=0), матч не
-    відкидається назавжди — позначається як кандидат для повторної
-    перевірки в наступному циклі сканування (live_odds_retry_candidates).
+    Кешує результат на LIVE_CACHE_TTL секунд.
+    При порожній відповіді позначає матч як кандидат на повтор.
     """
     now_ts = now_kyiv().timestamp()
 
     cached = live_odds_cache.get(fixture_id)
     if cached and cached.get("fav_side") == fav_side and now_ts - cached.get("ts", 0) < LIVE_CACHE_TTL:
+        print(f"    [LIVE ODDS⚽] fixture={fixture_id} з кешу: {cached.get('odd')}")
         return cached.get("odd")
 
     try:
@@ -583,15 +543,13 @@ async def fetch_live_odds_football(session, fixture_id, fav_side):
             print(f"    [LIVE ODDS⚽] fixture={fixture_id} status={r.status} response={len(data)} errors={errors}")
 
             if r.status != 200:
-                print(f"    [LIVE ODDS⚽] ⚠️ HTTP {r.status}: {raw}")
-                print(f"    [LIVE RAW] fixture={fixture_id} data={raw}")
+                print(f"    [LIVE ODDS⚽] HTTP {r.status}: {raw}")
                 live_odds_retry_candidates.add(fixture_id)
                 return None
             if errors:
-                print(f"    [LIVE ODDS⚽] ⚠️ errors: {errors}")
+                print(f"    [LIVE ODDS⚽] errors: {errors}")
             if not data:
-                print(f"    [LIVE ODDS⚽] ❌ порожня відповідь, кандидат на повтор. RAW: {raw}")
-                print(f"    [LIVE RAW] fixture={fixture_id} data={raw}")
+                print(f"    [LIVE ODDS⚽] ❌ порожня відповідь, кандидат на повтор")
                 live_odds_retry_candidates.add(fixture_id)
                 return None
 
@@ -600,7 +558,6 @@ async def fetch_live_odds_football(session, fixture_id, fav_side):
 
             if home_odd is None or away_odd is None:
                 print(f"    [LIVE ODDS⚽] ❌ fixture={fixture_id} не вдалось витягти odds")
-                print(f"    [LIVE RAW] fixture={fixture_id} data={raw}")
                 live_odds_retry_candidates.add(fixture_id)
                 return None
 
@@ -640,29 +597,28 @@ async def scan_football(session):
 
 async def _process_football_fixtures(session, fixtures):
     total = len(fixtures)
-    cnt_status = cnt_odds = cnt_score = cnt_live = cnt_signals = 0
 
-    # Розширення №8 (старе ТЗ) + п.9 нового ТЗ: лічильники причин відмов.
-    # Залишені попередні ключі для сумісності + додані нові з явними
-    # українськими назвами з нового ТЗ.
+    # ВИПРАВЛЕННЯ #4: розділено cnt_odds на два окремих лічильника
+    cnt_status   = 0
+    cnt_no_odds  = 0   # немає pre-match odds
+    cnt_odd_high = 0   # odd занадто високий
+    cnt_score    = 0
+    cnt_live     = 0
+    cnt_signals  = 0
+
     reasons = {
-        "no_prematch_odds":  0,   # немає prematch odds
-        "no_live_odds":      0,   # немає live odds
-        "fav_odd_too_high":  0,   # фаворит не відповідає порогу
-        "fav_not_losing":    0,   # фаворит не програє / не нічия-кандидат
-        "ht_skipped":        0,   # залишено для сумісності (HT тепер відсіюється статус-фільтром)
-        "minute_skipped":    0,   # хвилина поза діапазоном
-        "low_rise":          0,   # недостатній ріст коефіцієнта
-        "status_filtered":   0,   # відсіяно по статусу (не в LIVE_STATUSES)
+        "no_prematch_odds":  0,
+        "no_live_odds":      0,
+        "fav_odd_too_high":  0,
+        "fav_not_losing":    0,
+        "minute_skipped":    0,
+        "low_rise":          0,
+        "status_filtered":   0,
     }
 
     print(f"  [⚽ СКАН] Матчів отримано: {total}")
 
     for fix in fixtures:
-        # ── Усі дані матчу витягуємо у локальні змінні на початку циклу,
-        # щоб виключити будь-яке витікання значень з попередньої ітерації
-        # (Проблема №1 старого ТЗ). Жодна змінна нижче не використовується
-        # поза межами цієї ітерації for-циклу.
         fid          = None
         odds_data    = None
         fav_side     = None
@@ -677,14 +633,14 @@ async def _process_football_fixtures(session, fixtures):
             status_short = fix["fixture"]["status"].get("short", "")
             home         = fix["teams"]["home"]["name"]
             away         = fix["teams"]["away"]["name"]
-            score_h      = fix["goals"].get("home") if fix["goals"].get("home") is not None else 0
-            score_a      = fix["goals"].get("away") if fix["goals"].get("away") is not None else 0
+
+            # ВИПРАВЛЕННЯ #5: захист від None у fix["goals"]
+            goals   = fix.get("goals") or {}
+            score_h = goals.get("home") or 0
+            score_a = goals.get("away") or 0
 
             print(f"  [⚽] fid={fid} | {home} {score_h}:{score_a} {away} | хв={minute} | статус={status_short} | {league_name}")
 
-            # Фільтр 1: статус матчу. За новим ТЗ (п.3) LIVE_STATUSES={"1H","2H"},
-            # тож HT/ET/BT/P більше не доходять до обробки сигналів взагалі —
-            # окрема перевірка status_short=="HT" більше не потрібна.
             if status_short not in LIVE_STATUSES:
                 cnt_status += 1
                 reasons["status_filtered"] += 1
@@ -697,19 +653,16 @@ async def _process_football_fixtures(session, fixtures):
                 print(f"    → fid={fid} пропуск: хвилина {minute} > {MAX_MINUTE_FOOT}")
                 continue
 
-            # Фільтр 2: pre-match odds + визначення фаворита (п.1, п.2 старого ТЗ)
             odds_data = await fetch_prematch_odds_football(session, fid)
             if odds_data is None:
-                cnt_odds += 1
+                cnt_no_odds += 1
                 reasons["no_prematch_odds"] += 1
                 print(f"    → fid={fid} пропуск: pre-match odds не знайдено")
                 continue
 
-            # Захист від неузгодженості кешу: кеш ключується по fixture_id,
-            # тож odds_data мають належати саме цьому fid.
             if odds_data.get("fixture_id") != fid:
-                print(f"    → fid={fid} ⚠️ ПОМИЛКА УЗГОДЖЕНОСТІ: odds_data належить fixture={odds_data.get('fixture_id')}, пропуск")
-                cnt_odds += 1
+                print(f"    → fid={fid} ПОМИЛКА УЗГОДЖЕНОСТІ: odds належать fixture={odds_data.get('fixture_id')}, пропуск")
+                cnt_no_odds += 1
                 reasons["no_prematch_odds"] += 1
                 continue
 
@@ -720,20 +673,18 @@ async def _process_football_fixtures(session, fixtures):
 
             print(f"    → fid={fid} фаворит={fav_team} ({fav_side}) odd={fav_odd}")
 
-            # Розширення №6 (старе ТЗ): фаворит проходить, якщо коефіцієнт
-            # нижче порогу ИЛИ розрив коефіцієнтів достатньо великий.
             passes_threshold = fav_odd < FAV_THRESHOLD_FOOT
             passes_gap       = odds_data.get("fav_by_gap", False)
 
             if not passes_threshold and not passes_gap:
-                cnt_odds += 1
+                # ВИПРАВЛЕННЯ #4: окремий лічильник для "odd занадто високий"
+                cnt_odd_high += 1
                 reasons["fav_odd_too_high"] += 1
                 print(f"    → fid={fid} пропуск: fav_odd={fav_odd} >= {FAV_THRESHOLD_FOOT} і gap_ratio={round(odds_data.get('gap_ratio',0),2)} < {MIN_ODDS_GAP_RATIO}")
                 continue
             elif not passes_threshold and passes_gap:
                 print(f"    → fid={fid} фаворит підтверджено через gap_ratio={round(odds_data.get('gap_ratio',0),2)} (odd={fav_odd} >= порогу)")
 
-            # Фільтр 3: рахунок (п.3 старого ТЗ, п.4/5/12 нового ТЗ)
             if fav_side == "home":
                 fav_losing  = score_h < score_a
                 fav_drawing = score_h == score_a
@@ -745,59 +696,41 @@ async def _process_football_fixtures(session, fixtures):
                 fav_score   = score_a
                 und_score   = score_h
 
-            # П.5 нового ТЗ: для 0:0 у другому таймі порогова хвилина
-            # піднята з 46 до 55.
             is_00_second_half = (score_h == 0 and score_a == 0 and minute >= 55)
 
-            # П.4 нового ТЗ: нічийні рахунки 0:0/1:1/2:2/3:3 після 60-ї
-            # хвилини також допускаються до перевірки (не лише 0:0).
             is_allowed_draw_score = fav_drawing and score_h in DRAW_SCORES_ALLOWED
 
-            # Розширення №4 старого ТЗ: "ФАВОРИТ НЕ ВИГРАЄ" —
-            # хвилина >= 60, нічия, fav_odd <= 1.80
             not_winning_candidate = (
                 is_allowed_draw_score
                 and minute >= NOT_WINNING_MIN_MINUTE
                 and fav_odd <= NOT_WINNING_FAV_ODD_MAX
             )
 
-            # П.12 нового ТЗ: "СИЛЬНИЙ ФАВОРИТ НЕ МОЖЕ ВИГРАТИ" — той самий
-            # набір умов (fav_odd <= 1.80, нічия 0/1/2/3, minute >= 60),
-            # але це окремий тип сигналу, що працює паралельно з усіма
-            # іншими. Умови ідентичні not_winning_candidate за визначенням
-            # з ТЗ, тож обчислюємо явно під своєю назвою для прозорості.
-            score_draw = is_allowed_draw_score
+            # ВИПРАВЛЕННЯ #6: прибрано зайву умову minute >= NOT_WINNING_MIN_MINUTE
+            # з is_no_goals_case (is_00_second_half вже вимагає minute >= 55,
+            # а NOT_WINNING_MIN_MINUTE=60 — надлишково)
             strong_fav_cant_win_candidate = (
                 fav_odd <= NOT_WINNING_FAV_ODD_MAX
-                and score_draw
+                and is_allowed_draw_score
                 and minute >= NOT_WINNING_MIN_MINUTE
             )
 
-            # Загальний прохідний критерій по рахунку: фаворит програє,
-            # або 0:0 у 2-му таймі (стара логіка), або підходить як
-            # кандидат на "не виграє"/"нічия після 60". Якщо жодна з умов
-            # не виконана — матч відсіюється.
             if not fav_losing and not is_00_second_half and not not_winning_candidate and not strong_fav_cant_win_candidate:
                 cnt_score += 1
                 reasons["fav_not_losing"] += 1
                 print(f"    → fid={fid} пропуск: фаворит не програє (рахунок {score_h}:{score_a}, side={fav_side})")
                 continue
 
-            # Фільтр 4: чи вже надсилали сигнал цього типу для цього матчу.
-            # Окремі ключі для кожного типу сигналу — один сигнал кожного
-            # типу на матч (п.4 фінальної перевірки старого ТЗ).
-            key_losing        = f"foot_{fid}_fav_losing"
-            key_not_winning   = f"foot_{fid}_not_winning"
-            key_no_goals      = f"foot_{fid}_no_goals"
+            key_losing          = f"foot_{fid}_fav_losing"
+            key_not_winning     = f"foot_{fid}_not_winning"
+            key_no_goals        = f"foot_{fid}_no_goals"
             key_strong_cant_win = f"foot_{fid}_strong_cant_win"
 
-            # Визначаємо, який тип сигналу зараз розглядаємо. Перевіряємо
-            # у порядку специфічності: програє → 0:0 у 2-му таймі →
-            # сильний фаворит не може виграти (нова) → не виграє (нічия).
-            is_losing_case        = fav_losing
-            is_no_goals_case      = (not is_losing_case) and is_00_second_half and minute >= NOT_WINNING_MIN_MINUTE and fav_odd <= NOT_WINNING_FAV_ODD_MAX
-            is_strong_cant_win    = (not is_losing_case) and (not is_no_goals_case) and strong_fav_cant_win_candidate
-            is_not_winning_case   = (not is_losing_case) and (not is_no_goals_case) and (not is_strong_cant_win) and not_winning_candidate
+            is_losing_case      = fav_losing
+            # ВИПРАВЛЕННЯ #6: прибрано зайву перевірку minute >= NOT_WINNING_MIN_MINUTE
+            is_no_goals_case    = (not is_losing_case) and is_00_second_half
+            is_strong_cant_win  = (not is_losing_case) and (not is_no_goals_case) and strong_fav_cant_win_candidate
+            is_not_winning_case = (not is_losing_case) and (not is_no_goals_case) and (not is_strong_cant_win) and not_winning_candidate
 
             if is_losing_case:
                 active_key = key_losing
@@ -808,19 +741,12 @@ async def _process_football_fixtures(session, fixtures):
             elif is_not_winning_case:
                 active_key = key_not_winning
             else:
-                # Старий 0:0-у-другому-таймі кейс без виконання нових порогів —
-                # зберігаємо стару поведінку (сигнал "ФАВОРИТ НЕ ЗАБИВАЄ")
                 active_key = key_no_goals
 
             if active_key in notified:
                 print(f"    → fid={fid} вже надсилали: {active_key}")
                 continue
 
-            # Фільтр 5: live odds (тільки для матчів що пройшли всі фільтри).
-            # П.6 нового ТЗ: кешується на LIVE_CACHE_TTL секунд всередині
-            # fetch_live_odds_football. П.7: при порожній відповіді матч
-            # позначається кандидатом на повтор, а не відкидається назавжди
-            # (позначення відбувається всередині самої функції).
             live_odd = await fetch_live_odds_football(session, fid, fav_side)
             if live_odd is None:
                 cnt_live += 1
@@ -837,7 +763,6 @@ async def _process_football_fixtures(session, fixtures):
                 print(f"    → fid={fid} пропуск: ріст {rise}% < {MIN_ODDS_RISE_FOOT}%")
                 continue
 
-            # ── Генеруємо сигнал ──────────────────────────────────────────
             notified[active_key] = now_kyiv().timestamp()
             cnt_signals += 1
 
@@ -853,10 +778,10 @@ async def _process_football_fixtures(session, fixtures):
                     f"🚨 *СИГНАЛ: ФАВОРИТ ПРОГРАЄ*\n\n"
                     f"⚽ {lg_safe}\n"
                     f"*{home_safe}* {score_h}:{score_a} *{away_safe}*\n"
-                    f"⏱ Хвилина: {minute}'\n"
-                    f"🎯 Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
-                    f"📉 Коеф до матчу: `{fav_odd}`\n"
-                    f"📈 Коеф зараз: `{live_odd}` (+{rise}%)\n"
+                    f"Хвилина: {minute}'\n"
+                    f"Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
+                    f"Коеф до матчу: {fav_odd}\n"
+                    f"Коеф зараз: {live_odd} (+{rise}%)\n"
                     f"💪 {strength(rise)}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid}: {fav_team} програє {fav_score}:{und_score} +{rise}%")
@@ -867,11 +792,11 @@ async def _process_football_fixtures(session, fixtures):
                     f"🚨 *СИГНАЛ: ФАВОРИТ БЕЗ ГОЛІВ*\n\n"
                     f"⚽ {lg_safe}\n"
                     f"*{home_safe}* 0:0 *{away_safe}*\n"
-                    f"⏱ Хвилина: {minute}' (2-й тайм)\n"
-                    f"🎯 Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
-                    f"📉 Коеф до матчу: `{fav_odd}`\n"
-                    f"📈 Коеф зараз: `{live_odd}` (+{rise}%)\n"
-                    f"💡 Фаворит без голів у другому таймі\n"
+                    f"Хвилина: {minute}' (2-й тайм)\n"
+                    f"Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
+                    f"Коеф до матчу: {fav_odd}\n"
+                    f"Коеф зараз: {live_odd} (+{rise}%)\n"
+                    f"Фаворит без голів у другому таймі\n"
                     f"💪 {strength(rise)}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} 0:0: {fav_team} vs {und_team} {minute}' +{rise}%")
@@ -882,11 +807,11 @@ async def _process_football_fixtures(session, fixtures):
                     f"🚨 *СИГНАЛ: СИЛЬНИЙ ФАВОРИТ НЕ МОЖЕ ВИГРАТИ*\n\n"
                     f"⚽ {lg_safe}\n"
                     f"*{home_safe}* {score_h}:{score_a} *{away_safe}*\n"
-                    f"⏱ Хвилина: {minute}'\n"
-                    f"🎯 Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
-                    f"📉 Коеф до матчу: `{fav_odd}`\n"
-                    f"📈 Коеф зараз: `{live_odd}` (+{rise}%)\n"
-                    f"💡 Сильний фаворит (≤{NOT_WINNING_FAV_ODD_MAX}) тримає нічию\n"
+                    f"Хвилина: {minute}'\n"
+                    f"Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
+                    f"Коеф до матчу: {fav_odd}\n"
+                    f"Коеф зараз: {live_odd} (+{rise}%)\n"
+                    f"Сильний фаворит (менше {NOT_WINNING_FAV_ODD_MAX}) тримає нічию\n"
                     f"💪 {strength(rise)}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} сильний фаворит не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
@@ -897,11 +822,11 @@ async def _process_football_fixtures(session, fixtures):
                     f"🚨 *СИГНАЛ: ФАВОРИТ НЕ ВИГРАЄ*\n\n"
                     f"⚽ {lg_safe}\n"
                     f"*{home_safe}* {score_h}:{score_a} *{away_safe}*\n"
-                    f"⏱ Хвилина: {minute}'\n"
-                    f"🎯 Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
-                    f"📉 Коеф до матчу: `{fav_odd}`\n"
-                    f"📈 Коеф зараз: `{live_odd}` (+{rise}%)\n"
-                    f"💡 Фаворит не веде в рахунку\n"
+                    f"Хвилина: {minute}'\n"
+                    f"Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
+                    f"Коеф до матчу: {fav_odd}\n"
+                    f"Коеф зараз: {live_odd} (+{rise}%)\n"
+                    f"Фаворит не веде в рахунку\n"
                     f"💪 {strength(rise)}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
@@ -912,7 +837,7 @@ async def _process_football_fixtures(session, fixtures):
 
     print(
         f"  [⚽ ПІДСУМОК] всього={total} | "
-        f"статус={cnt_status} | odds={cnt_odds} | "
+        f"статус={cnt_status} | no_odds={cnt_no_odds} | odd_high={cnt_odd_high} | "
         f"рахунок={cnt_score} | live_odds={cnt_live} | "
         f"сигналів={cnt_signals}"
     )
@@ -948,11 +873,12 @@ async def main():
     print("=" * 50)
 
     async with aiohttp.ClientSession() as session:
+        # ВИПРАВЛЕННЯ #1: прибрано \\! та небезпечні спецсимволи Markdown v1
         await send_msg(session,
-            "✅ *FavTracker запущено\\!*\n\n"
+            "✅ *FavTracker запущено!*\n\n"
             "⚽ Моніторинг футболу по *всіх лігах* API\n\n"
-            f"⏱ Скан кожні {POLL_INTERVAL // 60} хвилин\n"
-            f"📡 API ліміт: {api_requests['football']['limit']} запитів/день"
+            f"Скан кожні {POLL_INTERVAL // 60} хвилин\n"
+            f"API ліміт: {api_requests['football']['limit']} запитів/день"
         )
 
         async def command_loop():
