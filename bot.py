@@ -35,7 +35,15 @@ live_odds_retry_candidates = set()
 
 LIVE_STATUSES = {"1H", "2H"}
 
-ODDS_MARKETS = {"Match Winner", "1X2", "Winner", "Full Time Result"}
+ODDS_MARKETS = {
+    "Match Winner",
+    "1X2",
+    "Winner",
+    "Full Time Result",
+    "Match Winner 1X2",
+    "Result",
+    "3Way Result",
+}
 
 PRE_ODDS_TTL = 6 * 3600
 
