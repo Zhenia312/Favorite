@@ -565,11 +565,11 @@ async def fetch_live_odds_football(session, fixture_id, fav_side):
             print(f"    [LIVE ODDS⚽] fixture={fixture_id} home={home_odd} away={away_odd}")
 
             if home_odd is None or away_odd is None:
-    print(f"    [LIVE ODDS⚽] ❌ fixture={fixture_id} не вдалось витягти odds")
+            print(f"    [LIVE ODDS⚽] ❌ fixture={fixture_id} не вдалось витягти odds")
 
-    print("    [LIVE ODDS⚽] RAW RESPONSE:")
-    import json
-    print(json.dumps(data[:1], indent=2, ensure_ascii=False))
+            print("    [LIVE ODDS⚽] RAW RESPONSE:")
+             import json
+             print(json.dumps(data[:1], indent=2, ensure_ascii=False))
 
     live_odds_retry_candidates.add(fixture_id)
     return None
