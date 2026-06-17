@@ -573,7 +573,7 @@ async def fetch_live_odds_football(session, fixture_id, fav_side):
 
     live_odds_retry_candidates.add(fixture_id)
     return None
-
+    
             live_odds_retry_candidates.discard(fixture_id)
             result_odd = home_odd if fav_side == "home" else away_odd
             live_odds_cache[fixture_id] = {
