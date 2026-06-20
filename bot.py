@@ -240,12 +240,12 @@ async def send_results_stat(session):
     await send_msg(session, "\n".join(lines))
 
 # ── ФУТБОЛ ────────────────────────────────────────────────────────────────
-FAV_THRESHOLD_FOOT = 2.50
-MIN_ODDS_RISE_FOOT = 15
+FAV_THRESHOLD_FOOT = 1.80
+MIN_ODDS_RISE_FOOT = 20
 MAX_MINUTE_FOOT    = 90
 
 NOT_WINNING_MIN_MINUTE  = 60
-NOT_WINNING_FAV_ODD_MAX = 1.80
+NOT_WINNING_FAV_ODD_MAX = 1.60
 
 MIN_ODDS_GAP_RATIO = 2.0
 
