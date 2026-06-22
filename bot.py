@@ -12,6 +12,12 @@ API_KEY    = os.environ.get("API_KEY", "")
 
 POLL_INTERVAL = 300
 
+# ── TEST_MODE: новий фільтр перевіряється паралельно зі старим,    ────────
+#    сигнали нового фільтра йдуть ТІЛЬКИ в тестовий чат, не змінюючи
+#    і не дублюючи основний потік. Старий код нижче ніяк не змінений.
+TEST_MODE     = os.environ.get("TEST_MODE", "false").lower() == "true"
+TEST_CHAT_ID  = os.environ.get("TEST_CHAT_ID", "")
+
 KYIV_TZ = timezone(timedelta(hours=3))
 
 def now_kyiv():
@@ -56,6 +62,36 @@ def init_db():
                 checked_time TEXT
             )
         """)
+        # ── ТЕСТОВА ТАБЛИЦЯ: окремо від основної "signals" ────────────────
+        # Сюди пишемо і ті сигнали, що пройшли новий фільтр (passed_filter=1),
+        # і ті, що НЕ пройшли (passed_filter=0) — щоб потім порівняти
+        # винрейт нового фільтра на свіжих даних.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS test_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fixture_id INTEGER NOT NULL,
+                signal_type TEXT NOT NULL,
+                league TEXT,
+                fav_team TEXT,
+                und_team TEXT,
+                fav_side TEXT,
+                pre_odd REAL,
+                live_odd REAL,
+                rise_pct REAL,
+                score_at_signal TEXT,
+                minute_at_signal INTEGER,
+                shots_on_target_fav INTEGER,
+                shots_on_target_und INTEGER,
+                red_card_und INTEGER,
+                passed_filter INTEGER NOT NULL,
+                skip_reason TEXT,
+                signal_time TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                final_score TEXT,
+                result TEXT,
+                checked_time TEXT
+            )
+        """)
         conn.commit()
         conn.close()
         print(f"[DB] Базу статистики ініціалізовано: {DB_PATH}")
@@ -81,6 +117,37 @@ def save_signal(fixture_id, signal_type, league, fav_team, und_team, fav_side,
         conn.close()
     except Exception as e:
         print(f"[DB ERROR] save_signal fid={fixture_id}: {e}")
+
+def save_test_signal(fixture_id, signal_type, league, fav_team, und_team, fav_side,
+                      pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
+                      shots_on_target_fav=None, shots_on_target_und=None,
+                      red_card_und=0, passed_filter=0, skip_reason=None):
+    """
+    Записує сигнал у тестову таблицю test_signals — НЕЗАЛЕЖНО від основної
+    таблиці signals. Пишемо сюди як ті сигнали, що пройшли новий фільтр,
+    так і ті, що не пройшли (з причиною в skip_reason) — щоб через 1-2
+    тижні порівняти, як новий фільтр відсіює сигнали і який у нього винрейт.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            INSERT INTO test_signals (
+                fixture_id, signal_type, league, fav_team, und_team, fav_side,
+                pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
+                shots_on_target_fav, shots_on_target_und, red_card_und,
+                passed_filter, skip_reason, signal_time, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        """, (
+            fixture_id, signal_type, league, fav_team, und_team, fav_side,
+            pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
+            shots_on_target_fav, shots_on_target_und, int(red_card_und),
+            int(passed_filter), skip_reason,
+            now_kyiv().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB ERROR] save_test_signal fid={fixture_id}: {e}")
 
 def _signal_is_success(signal_type, fav_score, und_score):
     """
@@ -297,6 +364,20 @@ MIN_ODDS_GAP_RATIO = 3.0
 
 DRAW_SCORES_ALLOWED = {0, 1, 2, 3}
 
+# ── ТЕСТОВИЙ ФІЛЬТР (TEST_MODE) ────────────────────────────────────────────
+# Це окремі, БІЛЬШ СУВОРІ пороги. Вони НЕ замінюють пороги вище і
+# НЕ впливають на основний сигнал — використовуються лише для
+# паралельної перевірки в тестовому чаті, коли TEST_MODE=true.
+TEST_FAV_THRESHOLD_FOOT = 1.65   # фаворит має бути сильнішим (було 1.80)
+TEST_MAX_SIGNAL_MINUTE  = 40     # сигнал fav_losing тільки до 40-ї хвилини (було без обмеження)
+
+# Пороги по статистиці матчу (удари в створ, червоні картки) для
+# тестового фільтра. Початкові значення підібрані "на око" — після
+# накопичення статистики за 1-2 тижні їх можна перерахувати так само,
+# як ми це робили з хвилиною і коефіцієнтом.
+TEST_MIN_SHOTS_ON_TARGET_DIFF = 2   # фаворит має бити в створ мінімум на 2 більше за суперника
+TEST_RED_CARD_BONUS = True          # якщо у андердога червона картка — це підсилює сигнал (бонус-умова, не обов'язкова)
+
 LIVE_CACHE_TTL = 60
 live_odds_cache = {}
 
@@ -392,6 +473,30 @@ async def send_msg(session, text, kb=None):
             return resp
     except Exception as e:
         print(f"[TG ERROR] {e}")
+
+async def send_test_msg(session, text):
+    """
+    Шле повідомлення ТІЛЬКИ в тестовий чат (TEST_CHAT_ID), без клавіатури.
+    Якщо TEST_MODE вимкнено або TEST_CHAT_ID не задано — нічого не робить.
+    Це гарантує, що тестовий фільтр ніяк не зачіпає основний чат TG_CHAT_ID.
+    """
+    if not TEST_MODE or not TEST_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {
+        "chat_id":    TEST_CHAT_ID,
+        "text":       text,
+        "parse_mode": "Markdown",
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.post(url, json=payload, timeout=timeout) as r:
+            resp = await r.json()
+            if not resp.get("ok"):
+                print(f"[TEST TG ERROR] {resp}")
+            return resp
+    except Exception as e:
+        print(f"[TEST TG ERROR] {e}")
 
 async def get_updates(session):
     global offset
@@ -892,6 +997,60 @@ def strength(rise, strong_rise=60, good_rise=40):
         return "✅ ХОРОШИЙ"
     return "⚠️ СЛАБКИЙ"
 
+# ── СТАТИСТИКА МАТЧУ (для тестового фільтра) ───────────────────────────────
+# Окремий запит до /fixtures/statistics. Викликається ТІЛЬКИ для кандидатів,
+# що вже пройшли базовий фільтр (хвилина+коефіцієнт) — щоб не витрачати
+# квоту на всі live-матчі підряд. З квотою 7500/день це безпечно.
+async def fetch_fixture_statistics(session, fixture_id):
+    """
+    Повертає dict {
+        "shots_on_target_home": int, "shots_on_target_away": int,
+        "red_cards_home": int, "red_cards_away": int
+    } або None, якщо статистика недоступна.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(
+            f"https://v3.football.api-sports.io/fixtures/statistics?fixture={fixture_id}",
+            headers={"x-apisports-key": API_KEY},
+            timeout=timeout
+        ) as r:
+            track_request("football")
+            raw  = await r.json()
+            data = raw.get("response", [])
+            print(f"    [STATS⚽] fixture={fixture_id} status={r.status} teams={len(data)}")
+
+            if r.status != 200 or len(data) < 2:
+                print(f"    [STATS⚽] ❌ недостатньо даних (teams={len(data)})")
+                return None
+
+            def extract(team_block):
+                shots_on_target = 0
+                red_cards = 0
+                for stat in team_block.get("statistics", []):
+                    stype = (stat.get("type") or "").strip().lower()
+                    val   = stat.get("value")
+                    if stype == "shots on goal" and val is not None:
+                        shots_on_target = int(val) if str(val).isdigit() else 0
+                    if stype == "red cards" and val is not None:
+                        red_cards = int(val) if str(val).isdigit() else 0
+                return shots_on_target, red_cards
+
+            # API зазвичай повертає [0]=home, [1]=away, але перевіряємо team.id
+            # не завжди доступний у відповіді — припускаємо порядок home/away
+            home_shots, home_red = extract(data[0])
+            away_shots, away_red = extract(data[1])
+
+            return {
+                "shots_on_target_home": home_shots,
+                "shots_on_target_away": away_shots,
+                "red_cards_home": home_red,
+                "red_cards_away": away_red,
+            }
+    except Exception as e:
+        print(f"    [STATS⚽ ERROR] fixture={fixture_id} {e}")
+    return None
+
 # ── СКАНУВАННЯ ────────────────────────────────────────────────────────────
 async def scan_football(session):
     if not football_enabled:
@@ -1074,6 +1233,86 @@ async def _process_football_fixtures(session, fixtures):
 
             notified[active_key] = now_kyiv().timestamp()
             cnt_signals += 1
+
+            # ── ТЕСТОВИЙ ФІЛЬТР (TEST_MODE) ────────────────────────────────
+            # Працює ПАРАЛЕЛЬНО зі старою логікою нижче, нічого в ній не
+            # змінює. Перевіряється тільки для типу "fav_losing" — це той
+            # тип, для якого ми знайшли залежність від хвилини й коефіцієнта.
+            # Результат (пройшов чи ні) пишеться в окрему таблицю test_signals.
+            if TEST_MODE and is_losing_case:
+                test_skip_reason = None
+                if fav_odd > TEST_FAV_THRESHOLD_FOOT:
+                    test_skip_reason = f"odd {fav_odd} > {TEST_FAV_THRESHOLD_FOOT}"
+                elif minute > TEST_MAX_SIGNAL_MINUTE:
+                    test_skip_reason = f"хвилина {minute} > {TEST_MAX_SIGNAL_MINUTE}"
+
+                if test_skip_reason:
+                    print(f"    [TEST] fid={fid} НЕ пройшов базовий тест-фільтр: {test_skip_reason}")
+                    save_test_signal(fid, "fav_losing", league_name, fav_team, und_team, fav_side,
+                                      fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
+                                      passed_filter=0, skip_reason=test_skip_reason)
+                else:
+                    # Базовий фільтр (коеф+хвилина) пройдено — тепер дивимось
+                    # статистику матчу (удари в створ, червоні картки).
+                    stats_data = await fetch_fixture_statistics(session, fid)
+                    shots_fav = shots_und = None
+                    red_und = 0
+                    stats_skip_reason = None
+
+                    if stats_data is None:
+                        stats_skip_reason = "статистика недоступна"
+                    else:
+                        if fav_side == "home":
+                            shots_fav = stats_data["shots_on_target_home"]
+                            shots_und = stats_data["shots_on_target_away"]
+                            red_und   = stats_data["red_cards_away"]
+                        else:
+                            shots_fav = stats_data["shots_on_target_away"]
+                            shots_und = stats_data["shots_on_target_home"]
+                            red_und   = stats_data["red_cards_home"]
+
+                        shots_diff = shots_fav - shots_und
+                        has_red_bonus = TEST_RED_CARD_BONUS and red_und > 0
+
+                        print(f"    [TEST] fid={fid} удари в створ фаворит={shots_fav} андердог={shots_und} (різниця={shots_diff}), червона у андердога={red_und}")
+
+                        if shots_diff < TEST_MIN_SHOTS_ON_TARGET_DIFF and not has_red_bonus:
+                            stats_skip_reason = f"удари в створ: різниця {shots_diff} < {TEST_MIN_SHOTS_ON_TARGET_DIFF} і немає червоної картки у андердога"
+
+                    if stats_skip_reason:
+                        print(f"    [TEST] fid={fid} НЕ пройшов фільтр статистики: {stats_skip_reason}")
+                        save_test_signal(fid, "fav_losing", league_name, fav_team, und_team, fav_side,
+                                          fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
+                                          shots_on_target_fav=shots_fav, shots_on_target_und=shots_und,
+                                          red_card_und=red_und, passed_filter=0, skip_reason=stats_skip_reason)
+                    else:
+                        print(f"    [TEST] ✅ fid={fid} пройшов ПОВНИЙ тест-фільтр (коеф+хвилина+статистика)")
+                        save_test_signal(fid, "fav_losing", league_name, fav_team, und_team, fav_side,
+                                          fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
+                                          shots_on_target_fav=shots_fav, shots_on_target_und=shots_und,
+                                          red_card_und=red_und, passed_filter=1, skip_reason=None)
+
+                        test_lg_safe   = escape_md(league_name)
+                        test_fav_safe  = escape_md(fav_team)
+                        test_und_safe  = escape_md(und_team)
+                        test_home_safe = escape_md(home)
+                        test_away_safe = escape_md(away)
+                        shots_line = ""
+                        if shots_fav is not None:
+                            shots_line = f"Удари в створ: {test_fav_safe} {shots_fav} — {test_und_safe} {shots_und}\n"
+                        red_line = "🟥 У андердога червона картка\n" if red_und > 0 else ""
+
+                        await send_test_msg(session,
+                            f"🧪 *[TEST] СИГНАЛ: ФАВОРИТ ПРОГРАЄ*\n\n"
+                            f"⚽ {test_lg_safe}\n"
+                            f"*{test_home_safe}* {score_h}:{score_a} *{test_away_safe}*\n"
+                            f"Хвилина: {minute}'\n"
+                            f"Фаворит: *{test_fav_safe}* (коеф {fav_odd})\n"
+                            f"Коеф зараз: {live_odd} (+{rise}%)\n"
+                            f"{shots_line}"
+                            f"{red_line}"
+                            f"💪 {strength(rise)}"
+                        )
 
             lg_safe   = escape_md(league_name)
             fav_safe  = escape_md(fav_team)
