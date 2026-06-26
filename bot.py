@@ -423,6 +423,9 @@ TEST_RED_CARD_BONUS = True          # якщо у андердога черво�
 # без додаткового сканування всіх live-матчів і без зайвих запитів до API.
 SOT_TOTAL_MIN_SHOTS     = 8     # сума ударів у площину (фаворит + андердог) >= цього
 SOT_TOTAL_MIN_MINUTE    = 30    # не раніше 30-ї хвилини, щоб сума встигла накопичитись
+SOT_TOTAL_FAV_ODD_MAX   = 2.00  # власний, м'якший поріг кф фаворита саме для цього типу
+                                 # (вищий, ніж NOT_WINNING_FAV_ODD_MAX=1.50, бо тут не
+                                 # потрібен настільки явний фаворит — рахунок не головне)
 
 LIVE_CACHE_TTL = 60
 live_odds_cache = {}
@@ -1229,7 +1232,22 @@ async def _process_football_fixtures(session, fixtures):
                 and minute >= NOT_WINNING_MIN_MINUTE
             )
 
-            if not fav_losing and not is_00_second_half and not not_winning_candidate and not strong_fav_cant_win_candidate:
+            # ── sot_total_high: окремий, м'якший прохідний прапор ───────────
+            # Власний поріг кф фаворита (SOT_TOTAL_FAV_ODD_MAX=2.00) — вищий,
+            # ніж у not_winning/strong_cant_win (1.50). Дозволяє нічийному
+            # рахунку (fav_drawing) дійти до перевірки ударів навіть тоді,
+            # коли фаворит не настільки явний, щоб пройти інші типи сигналу.
+            # На результат (fav_losing/win) цей прапор НЕ впливає — лише
+            # відкриває шлях до перевірки sot_total_high нижче.
+            sot_draw_candidate = (
+                fav_drawing
+                and score_h in DRAW_SCORES_ALLOWED
+                and minute >= SOT_TOTAL_MIN_MINUTE
+                and fav_odd <= SOT_TOTAL_FAV_ODD_MAX
+            )
+
+            if (not fav_losing and not is_00_second_half and not not_winning_candidate
+                    and not strong_fav_cant_win_candidate and not sot_draw_candidate):
                 cnt_score += 1
                 reasons["fav_not_losing"] += 1
                 print(f"    → fid={fid} пропуск: фаворит не програє (рахунок {score_h}:{score_a}, side={fav_side})")
@@ -1274,7 +1292,8 @@ async def _process_football_fixtures(session, fixtures):
             # раз пізніше, коли сума ударів виросте. Тут лише перевіряємо,
             # чи варто йти за статистикою — сама перевірка ударів нижче.
             sot_candidate = (
-                is_losing_case or is_no_goals_case or is_strong_cant_win or is_not_winning_case
+                is_losing_case or is_no_goals_case or is_strong_cant_win
+                or is_not_winning_case or sot_draw_candidate
             ) and minute >= SOT_TOTAL_MIN_MINUTE
 
             if is_losing_case:
