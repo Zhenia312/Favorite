@@ -32,6 +32,7 @@ SIGNAL_TYPE_LABELS = {
     "no_goals":       "Фаворит без голів",
     "strong_cant_win": "Сильний фаворит не може виграти",
     "not_winning":    "Фаворит не виграє",
+    "sot_total_high": "Багато ударів у ворота",
 }
 
 FINISHED_STATUSES = {"FT", "AET", "PEN"}
@@ -59,9 +60,23 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending',
                 final_score TEXT,
                 result TEXT,
-                checked_time TEXT
+                checked_time TEXT,
+                edge_side TEXT,
+                edge_result TEXT
             )
         """)
+        # ── МІГРАЦІЯ: додаємо edge_side/edge_result, якщо таблиця вже існувала
+        # на Railway без цих колонок (старіший деплой). Для sot_total_high:
+        # - result      = "win"/"loss" по тому самому критерію, що й у решти
+        #                 типів (фаворит не програв) — fav_outcome з обговорення.
+        # - edge_side   = хто бив більше в площину на момент сигналу: fav/underdog/equal
+        # - edge_result = чи саме сторона з перевагою по ударах не програла (edge_outcome)
+        # Для всіх інших типів сигналів edge_side/edge_result лишаються NULL.
+        for col, col_type in [("edge_side", "TEXT"), ("edge_result", "TEXT")]:
+            try:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # колонка вже існує
         # ── ТЕСТОВА ТАБЛИЦЯ: окремо від основної "signals" ────────────────
         # Сюди пишемо і ті сигнали, що пройшли новий фільтр (passed_filter=1),
         # і ті, що НЕ пройшли (passed_filter=0) — щоб потім порівняти
@@ -99,19 +114,20 @@ def init_db():
         print(f"[DB ERROR] init_db: {e}")
 
 def save_signal(fixture_id, signal_type, league, fav_team, und_team, fav_side,
-                 pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal):
+                 pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
+                 edge_side=None):
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("""
             INSERT INTO signals (
                 fixture_id, signal_type, league, fav_team, und_team, fav_side,
                 pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
-                signal_time, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                signal_time, status, edge_side
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         """, (
             fixture_id, signal_type, league, fav_team, und_team, fav_side,
             pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
-            now_kyiv().strftime("%Y-%m-%d %H:%M:%S"),
+            now_kyiv().strftime("%Y-%m-%d %H:%M:%S"), edge_side,
         ))
         conn.commit()
         conn.close()
@@ -163,7 +179,7 @@ async def check_pending_results(session):
     try:
         conn = sqlite3.connect(DB_PATH)
         rows = conn.execute(
-            "SELECT id, fixture_id, signal_type, fav_side FROM signals WHERE status='pending'"
+            "SELECT id, fixture_id, signal_type, fav_side, edge_side FROM signals WHERE status='pending'"
         ).fetchall()
         conn.close()
     except Exception as e:
@@ -200,7 +216,7 @@ async def check_pending_results(session):
     try:
         conn = sqlite3.connect(DB_PATH)
         updated = 0
-        for row_id, fixture_id, signal_type, fav_side in rows:
+        for row_id, fixture_id, signal_type, fav_side, edge_side in rows:
             fix = fixture_data.get(fixture_id)
             if not fix:
                 continue
@@ -231,12 +247,22 @@ async def check_pending_results(session):
             result      = "win" if success else "loss"
             final_score = f"{score_h}:{score_a}"
 
+            # ── edge_result (тільки для sot_total_high, де edge_side не NULL) ─
+            # "win" якщо сторона з перевагою по ударах (edge_side) не програла.
+            # Якщо edge_side="equal" (рівні удари) — edge_result лишаємо NULL,
+            # бо тут нема кого перевіряти на перевагу.
+            edge_result = None
+            if edge_side == "fav":
+                edge_result = "win" if fav_score >= und_score else "loss"
+            elif edge_side == "underdog":
+                edge_result = "win" if und_score >= fav_score else "loss"
+
             conn.execute(
-                "UPDATE signals SET status='completed', final_score=?, result=?, checked_time=? WHERE id=?",
-                (final_score, result, now_kyiv().strftime("%Y-%m-%d %H:%M:%S"), row_id)
+                "UPDATE signals SET status='completed', final_score=?, result=?, checked_time=?, edge_result=? WHERE id=?",
+                (final_score, result, now_kyiv().strftime("%Y-%m-%d %H:%M:%S"), edge_result, row_id)
             )
             updated += 1
-            print(f"  [РЕЗУЛЬТАТИ] fid={fixture_id} {signal_type} → {final_score} → {result}")
+            print(f"  [РЕЗУЛЬТАТИ] fid={fixture_id} {signal_type} → {final_score} → {result}" + (f" (edge={edge_side}→{edge_result})" if edge_side else ""))
 
         conn.commit()
         conn.close()
@@ -364,6 +390,15 @@ MIN_ODDS_GAP_RATIO = 3.0
 
 DRAW_SCORES_ALLOWED = {0, 1, 2, 3}
 
+# ── ФІЛЬТР "ФАВОРИТ ПРОГРАЄ" (Варіант A, перевірено на 41 завершеному сигналі) ──
+# Раніше fav_losing спрацьовував без обмеження по коефіцієнту і хвилині —
+# тільки на FAV_THRESHOLD_FOOT=1.80 + MIN_ODDS_RISE_FOOT=30%. На зібраній
+# статистиці без цього додаткового фільтра winrate ≈61%, з ним — ≈83%
+# (n=12, +114% ROI на наявних даних). Це той самий фільтр, що раніше жив
+# тільки в TEST_MODE — переносимо його в основний продакшн-сигнал.
+LOSING_FAV_ODD_MAX       = 1.65
+LOSING_MAX_SIGNAL_MINUTE = 40
+
 # ── ТЕСТОВИЙ ФІЛЬТР (TEST_MODE) ────────────────────────────────────────────
 # Це окремі, БІЛЬШ СУВОРІ пороги. Вони НЕ замінюють пороги вище і
 # НЕ впливають на основний сигнал — використовуються лише для
@@ -377,6 +412,17 @@ TEST_MAX_SIGNAL_MINUTE  = 40     # сигнал fav_losing тільки до 40-
 # як ми це робили з хвилиною і коефіцієнтом.
 TEST_MIN_SHOTS_ON_TARGET_DIFF = 2   # фаворит має бити в створ мінімум на 2 більше за суперника
 TEST_RED_CARD_BONUS = True          # якщо у андердога червона картка — це підсилює сигнал (бонус-умова, не обов'язкова)
+
+# ── НОВИЙ ТИП СИГНАЛУ: "БАГАТО УДАРІВ У ВОРОТА" (sot_total_high) ───────────
+# Незалежний від конкретного боку тип сигналу: спрацьовує коли СУМА ударів
+# у площину воріт обох команд висока (гра відкрита, багато моментів),
+# незалежно від того, хто саме б'є більше. У повідомленні просто вказуємо,
+# на чию користь перевага по ударах — це інформація, не умова спрацювання.
+# Перевіряється лише серед матчів, де фаворит вже програє/не виграє
+# (той самий пул кандидатів, що й fav_losing/no_goals/strong_cant_win) —
+# без додаткового сканування всіх live-матчів і без зайвих запитів до API.
+SOT_TOTAL_MIN_SHOTS     = 8     # сума ударів у площину (фаворит + андердог) >= цього
+SOT_TOTAL_MIN_MINUTE    = 30    # не раніше 30-ї хвилини, щоб сума встигла накопичитись
 
 LIVE_CACHE_TTL = 60
 live_odds_cache = {}
@@ -1193,12 +1239,43 @@ async def _process_football_fixtures(session, fixtures):
             key_not_winning     = f"foot_{fid}_not_winning"
             key_no_goals        = f"foot_{fid}_no_goals"
             key_strong_cant_win = f"foot_{fid}_strong_cant_win"
+            key_sot_total       = f"foot_{fid}_sot_total_high"
 
-            is_losing_case      = fav_losing
+            # ── Варіант A: суворіший фільтр для fav_losing ──────────────────
+            # fav_losing спрацьовує лише якщо фаворит реально сильний
+            # (odd <= LOSING_FAV_ODD_MAX) і сигнал стався не пізніше
+            # LOSING_MAX_SIGNAL_MINUTE. Якщо рахунок підходить (fav_losing=True),
+            # але ці умови не виконані — сигнал просто не йде (а не "перетікає"
+            # в інший тип), щоб не плутати статистику різних типів сигналів.
+            losing_passes_filter = (
+                fav_losing
+                and fav_odd <= LOSING_FAV_ODD_MAX
+                and minute <= LOSING_MAX_SIGNAL_MINUTE
+            )
+            losing_rejected_by_filter = fav_losing and not losing_passes_filter
+
+            is_losing_case      = losing_passes_filter
             # ВИПРАВЛЕННЯ #6: прибрано зайву перевірку minute >= NOT_WINNING_MIN_MINUTE
-            is_no_goals_case    = (not is_losing_case) and is_00_second_half
-            is_strong_cant_win  = (not is_losing_case) and (not is_no_goals_case) and strong_fav_cant_win_candidate
-            is_not_winning_case = (not is_losing_case) and (not is_no_goals_case) and (not is_strong_cant_win) and not_winning_candidate
+            is_no_goals_case    = (not fav_losing) and is_00_second_half
+            is_strong_cant_win  = (not fav_losing) and (not is_no_goals_case) and strong_fav_cant_win_candidate
+            is_not_winning_case = (not fav_losing) and (not is_no_goals_case) and (not is_strong_cant_win) and not_winning_candidate
+
+            if losing_rejected_by_filter:
+                cnt_score += 1
+                reasons["fav_losing_filtered_out"] = reasons.get("fav_losing_filtered_out", 0) + 1
+                print(f"    → fid={fid} fav_losing відсіяно фільтром: odd={fav_odd} (макс {LOSING_FAV_ODD_MAX}), хв={minute} (макс {LOSING_MAX_SIGNAL_MINUTE})")
+                continue
+
+            # ── НОВИЙ ТИП: sot_total_high ────────────────────────────────────
+            # Перевіряється серед тих самих кандидатів (фаворит вже
+            # програє/не виграє), якщо жоден з "основних" кейсів не активний,
+            # АБО навіть якщо основний кейс активний — sot_total_high має
+            # окремий ключ антидублювання, тож може зловити цей же матч ще
+            # раз пізніше, коли сума ударів виросте. Тут лише перевіряємо,
+            # чи варто йти за статистикою — сама перевірка ударів нижче.
+            sot_candidate = (
+                is_losing_case or is_no_goals_case or is_strong_cant_win or is_not_winning_case
+            ) and minute >= SOT_TOTAL_MIN_MINUTE
 
             if is_losing_case:
                 active_key = key_losing
@@ -1209,7 +1286,11 @@ async def _process_football_fixtures(session, fixtures):
             elif is_not_winning_case:
                 active_key = key_not_winning
             else:
-                active_key = key_no_goals
+                # Сюди потрапляти не повинні, бо вище вже відфільтровано
+                # все, що не fav_losing/no_goals/strong_cant_win/not_winning.
+                cnt_score += 1
+                print(f"    → fid={fid} пропуск: жоден тип сигналу не підійшов")
+                continue
 
             if active_key in notified:
                 print(f"    → fid={fid} вже надсилали: {active_key}")
@@ -1386,6 +1467,51 @@ async def _process_football_fixtures(session, fixtures):
                     f"💪 {strength(rise)}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
+
+            # ── НОВИЙ ТИП: sot_total_high ────────────────────────────────────
+            # Перевіряється ДОДАТКОВО, незалежно від того, який з основних
+            # кейсів вище спрацював — тому власний ключ антидублювання
+            # (key_sot_total), окреме повідомлення, окремий рядок у БД.
+            # Не блокує і не замінює основний сигнал.
+            if sot_candidate and key_sot_total not in notified:
+                stats_data = await fetch_fixture_statistics(session, fid)
+                if stats_data is not None:
+                    if fav_side == "home":
+                        shots_fav = stats_data["shots_on_target_home"]
+                        shots_und = stats_data["shots_on_target_away"]
+                    else:
+                        shots_fav = stats_data["shots_on_target_away"]
+                        shots_und = stats_data["shots_on_target_home"]
+
+                    shots_total = shots_fav + shots_und
+                    print(f"    → fid={fid} [SOT] удари в створ: фаворит={shots_fav} андердог={shots_und} сума={shots_total} (мін={SOT_TOTAL_MIN_SHOTS})")
+
+                    if shots_total >= SOT_TOTAL_MIN_SHOTS:
+                        if shots_fav > shots_und:
+                            edge_side = "fav"
+                            edge_line = f"Переважає фаворит: {fav_team} {shots_fav} — {und_team} {shots_und}"
+                        elif shots_und > shots_fav:
+                            edge_side = "underdog"
+                            edge_line = f"Переважає андердог: {und_team} {shots_und} — {fav_team} {shots_fav}"
+                        else:
+                            edge_side = "equal"
+                            edge_line = f"Удари в створ рівні: {shots_fav} — {shots_fav}"
+
+                        notified[key_sot_total] = now_kyiv().timestamp()
+                        add_signal(f"Багато ударів {fav_team} vs {und_team} ({shots_total})")
+                        save_signal(fid, "sot_total_high", league_name, fav_team, und_team, fav_side,
+                                    fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
+                                    edge_side=edge_side)
+                        await send_msg(session,
+                            f"🚨 *СИГНАЛ: БАГАТО УДАРІВ У ВОРОТА*\n\n"
+                            f"⚽ {lg_safe}\n"
+                            f"*{home_safe}* {score_h}:{score_a} *{away_safe}*\n"
+                            f"Хвилина: {minute}'\n"
+                            f"Сума ударів у створ: {shots_total} (≥{SOT_TOTAL_MIN_SHOTS})\n"
+                            f"{edge_line}\n"
+                            f"Фаворит: *{fav_safe}* (коеф {fav_odd})"
+                        )
+                        print(f"  ⚽ СИГНАЛ fid={fid} sot_total_high: сума ударів={shots_total}")
 
         except Exception as e:
             print(f"  [⚽ ПОМИЛКА МАТЧУ fid={fix.get('fixture',{}).get('id','?')}] {e}")
