@@ -29,9 +29,8 @@ RESULTS_CHECK_INTERVAL = 600  # перевірка результатів раз
 
 SIGNAL_TYPE_LABELS = {
     "fav_losing":     "Фаворит програє",
-    "no_goals":       "Фаворит без голів",
+    "no_goals":       "Тотал менше (АЖ 1.75)",
     "strong_cant_win": "Сильний фаворит не може виграти",
-    "not_winning":    "Фаворит не виграє",
     "sot_total_high": "Багато ударів у ворота",
 }
 
@@ -168,11 +167,15 @@ def save_test_signal(fixture_id, signal_type, league, fav_team, und_team, fav_si
 def _signal_is_success(signal_type, fav_score, und_score):
     """
     Критерій успіху сигналу:
-    - 'no_goals' (ФАВОРИТ БЕЗ ГОЛІВ) — успіх ТІЛЬКИ якщо фаворит виграв
+    - 'no_goals' (маркет: Азіатський тотал МЕНШЕ 1.75) — успіх якщо сумарно
+      в матчі 0 або 1 гол (повний виграш AЖ 1.75). Рахунок з сумою=2 —
+      це частковий програш/частковий повернення (push) по факту, але як
+      бінарний success/fail тут вважається невдачею — реальний ROI на
+      практиці трохи кращий, ніж цей winrate показує.
     - всі інші типи — успіх якщо фаворит не програв (виграв або зіграв нічию)
     """
     if signal_type == "no_goals":
-        return fav_score > und_score
+        return (fav_score + und_score) <= 1
     return fav_score >= und_score
 
 async def check_pending_results(session):
@@ -398,6 +401,10 @@ DRAW_SCORES_ALLOWED = {0, 1, 2, 3}
 # тільки в TEST_MODE — переносимо його в основний продакшн-сигнал.
 LOSING_FAV_ODD_MAX       = 1.65
 LOSING_MAX_SIGNAL_MINUTE = 40
+# Потолок росту кф для fav_losing: за даними бек-тесту (50 сигналів) winrate
+# падає з 66-89% до 33% коли rise_pct >= 80% — ринок вже "з'їв" цінність,
+# заходити пізно.
+LOSING_MAX_RISE_PCT      = 80
 
 # ── ТЕСТОВИЙ ФІЛЬТР (TEST_MODE) ────────────────────────────────────────────
 # Це окремі, БІЛЬШ СУВОРІ пороги. Вони НЕ замінюють пороги вище і
@@ -421,7 +428,7 @@ TEST_RED_CARD_BONUS = True          # якщо у андердога черво�
 # Перевіряється лише серед матчів, де фаворит вже програє/не виграє
 # (той самий пул кандидатів, що й fav_losing/no_goals/strong_cant_win) —
 # без додаткового сканування всіх live-матчів і без зайвих запитів до API.
-SOT_TOTAL_MIN_SHOTS     = 8     # сума ударів у площину (фаворит + андердог) >= цього
+SOT_TOTAL_MIN_SHOTS     = 4     # сума ударів у площину (фаворит + андердог) >= цього
 SOT_TOTAL_MIN_MINUTE    = 30    # не раніше 30-ї хвилини, щоб сума встигла накопичитись
 SOT_TOTAL_FAV_ODD_MAX   = 2.00  # власний, м'якший поріг кф фаворита саме для цього типу
                                  # (вищий, ніж NOT_WINNING_FAV_ODD_MAX=1.50, бо тут не
@@ -1122,6 +1129,7 @@ async def _process_football_fixtures(session, fixtures):
     cnt_score    = 0
     cnt_live     = 0
     cnt_signals  = 0
+    leagues_no_odds = {}   # діагностика: скільки разів кожна ліга не мала pre-match odds
 
     reasons = {
         "no_prematch_odds":  0,
@@ -1174,13 +1182,15 @@ async def _process_football_fixtures(session, fixtures):
             if odds_data is None:
                 cnt_no_odds += 1
                 reasons["no_prematch_odds"] += 1
-                print(f"    → fid={fid} пропуск: pre-match odds не знайдено")
+                leagues_no_odds[league_name] = leagues_no_odds.get(league_name, 0) + 1
+                print(f"    → fid={fid} пропуск: pre-match odds не знайдено (ліга: {league_name})")
                 continue
 
             if odds_data.get("fixture_id") != fid:
                 print(f"    → fid={fid} ПОМИЛКА УЗГОДЖЕНОСТІ: odds належать fixture={odds_data.get('fixture_id')}, пропуск")
                 cnt_no_odds += 1
                 reasons["no_prematch_odds"] += 1
+                leagues_no_odds[league_name] = leagues_no_odds.get(league_name, 0) + 1
                 continue
 
             fav_side = odds_data["fav_side"]
@@ -1217,12 +1227,6 @@ async def _process_football_fixtures(session, fixtures):
 
             is_allowed_draw_score = fav_drawing and score_h in DRAW_SCORES_ALLOWED
 
-            not_winning_candidate = (
-                is_allowed_draw_score
-                and minute >= NOT_WINNING_MIN_MINUTE
-                and fav_odd <= NOT_WINNING_FAV_ODD_MAX
-            )
-
             # ВИПРАВЛЕННЯ #6: прибрано зайву умову minute >= NOT_WINNING_MIN_MINUTE
             # з is_no_goals_case (is_00_second_half вже вимагає minute >= 55,
             # а NOT_WINNING_MIN_MINUTE=60 — надлишково)
@@ -1246,7 +1250,7 @@ async def _process_football_fixtures(session, fixtures):
                 and fav_odd <= SOT_TOTAL_FAV_ODD_MAX
             )
 
-            if (not fav_losing and not is_00_second_half and not not_winning_candidate
+            if (not fav_losing and not is_00_second_half
                     and not strong_fav_cant_win_candidate and not sot_draw_candidate):
                 cnt_score += 1
                 reasons["fav_not_losing"] += 1
@@ -1254,7 +1258,6 @@ async def _process_football_fixtures(session, fixtures):
                 continue
 
             key_losing          = f"foot_{fid}_fav_losing"
-            key_not_winning     = f"foot_{fid}_not_winning"
             key_no_goals        = f"foot_{fid}_no_goals"
             key_strong_cant_win = f"foot_{fid}_strong_cant_win"
             key_sot_total       = f"foot_{fid}_sot_total_high"
@@ -1276,7 +1279,6 @@ async def _process_football_fixtures(session, fixtures):
             # ВИПРАВЛЕННЯ #6: прибрано зайву перевірку minute >= NOT_WINNING_MIN_MINUTE
             is_no_goals_case    = (not fav_losing) and is_00_second_half
             is_strong_cant_win  = (not fav_losing) and (not is_no_goals_case) and strong_fav_cant_win_candidate
-            is_not_winning_case = (not fav_losing) and (not is_no_goals_case) and (not is_strong_cant_win) and not_winning_candidate
 
             if losing_rejected_by_filter:
                 cnt_score += 1
@@ -1293,7 +1295,7 @@ async def _process_football_fixtures(session, fixtures):
             # чи варто йти за статистикою — сама перевірка ударів нижче.
             sot_candidate = (
                 is_losing_case or is_no_goals_case or is_strong_cant_win
-                or is_not_winning_case or sot_draw_candidate
+                or sot_draw_candidate
             ) and minute >= SOT_TOTAL_MIN_MINUTE
 
             if is_losing_case:
@@ -1302,11 +1304,9 @@ async def _process_football_fixtures(session, fixtures):
                 active_key = key_no_goals
             elif is_strong_cant_win:
                 active_key = key_strong_cant_win
-            elif is_not_winning_case:
-                active_key = key_not_winning
             else:
                 # Сюди потрапляти не повинні, бо вище вже відфільтровано
-                # все, що не fav_losing/no_goals/strong_cant_win/not_winning.
+                # все, що не fav_losing/no_goals/strong_cant_win.
                 cnt_score += 1
                 print(f"    → fid={fid} пропуск: жоден тип сигналу не підійшов")
                 continue
@@ -1329,6 +1329,14 @@ async def _process_football_fixtures(session, fixtures):
                 cnt_live += 1
                 reasons["low_rise"] += 1
                 print(f"    → fid={fid} пропуск: ріст {rise}% < {MIN_ODDS_RISE_FOOT}%")
+                continue
+
+            # fav_losing: за бек-тестом сигнал стає збитковим при rise_pct>=80%
+            # (winrate падає до 33%) — ринок вже переоцінив ситуацію, пізно заходити.
+            if is_losing_case and rise >= LOSING_MAX_RISE_PCT:
+                cnt_live += 1
+                reasons["losing_rise_too_high"] = reasons.get("losing_rise_too_high", 0) + 1
+                print(f"    → fid={fid} пропуск: fav_losing rise={rise}% >= {LOSING_MAX_RISE_PCT}% (пізно, ринок вже оцінив)")
                 continue
 
             notified[active_key] = now_kyiv().timestamp()
@@ -1441,17 +1449,18 @@ async def _process_football_fixtures(session, fixtures):
                 save_signal(fid, "no_goals", league_name, fav_team, und_team, fav_side,
                             fav_odd, live_odd, rise, "0:0", minute)
                 await send_msg(session,
-                    f"🚨 *СИГНАЛ: ФАВОРИТ БЕЗ ГОЛІВ*\n\n"
+                    f"🚨 *СИГНАЛ: ТОТАЛ МЕНШЕ (АЖ 1.75)*\n\n"
                     f"⚽ {lg_safe}\n"
                     f"*{home_safe}* 0:0 *{away_safe}*\n"
                     f"Хвилина: {minute}' (2-й тайм)\n"
                     f"Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
                     f"Коеф до матчу: {fav_odd}\n"
                     f"Коеф зараз: {live_odd} (+{rise}%)\n"
-                    f"Фаворит без голів у другому таймі\n"
+                    f"📊 Маркет: Азіатський тотал МЕНШЕ 1.75\n"
+                    f"(за бек-тестом: 61.7% повний виграш + 27.7% частковий повернення)\n"
                     f"💪 {strength(rise)}"
                 )
-                print(f"  ⚽ СИГНАЛ fid={fid} 0:0: {fav_team} vs {und_team} {minute}' +{rise}%")
+                print(f"  ⚽ СИГНАЛ fid={fid} тотал<1.75: {fav_team} vs {und_team} {minute}' +{rise}%")
 
             elif is_strong_cant_win:
                 add_signal(f"{fav_team} не може виграти {score_h}:{score_a}")
@@ -1469,23 +1478,6 @@ async def _process_football_fixtures(session, fixtures):
                     f"💪 {strength(rise)}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} сильний фаворит не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
-
-            elif is_not_winning_case:
-                add_signal(f"{fav_team} не виграє {score_h}:{score_a}")
-                save_signal(fid, "not_winning", league_name, fav_team, und_team, fav_side,
-                            fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute)
-                await send_msg(session,
-                    f"🚨 *СИГНАЛ: ФАВОРИТ НЕ ВИГРАЄ*\n\n"
-                    f"⚽ {lg_safe}\n"
-                    f"*{home_safe}* {score_h}:{score_a} *{away_safe}*\n"
-                    f"Хвилина: {minute}'\n"
-                    f"Фаворит: *{fav_safe}* (коеф {fav_odd})\n"
-                    f"Коеф до матчу: {fav_odd}\n"
-                    f"Коеф зараз: {live_odd} (+{rise}%)\n"
-                    f"Фаворит не веде в рахунку\n"
-                    f"💪 {strength(rise)}"
-                )
-                print(f"  ⚽ СИГНАЛ fid={fid} не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
 
             # ── НОВИЙ ТИП: sot_total_high ────────────────────────────────────
             # Перевіряється ДОДАТКОВО, незалежно від того, який з основних
@@ -1552,6 +1544,10 @@ async def _process_football_fixtures(session, fixtures):
         f"minute_skipped={reasons['minute_skipped']} | "
         f"status_filtered={reasons['status_filtered']}"
     )
+    if leagues_no_odds:
+        top_leagues = sorted(leagues_no_odds.items(), key=lambda x: -x[1])[:10]
+        leagues_str = ", ".join(f"{lg}({cnt})" for lg, cnt in top_leagues)
+        print(f"  [ДІАГНОСТИКА no_odds] топ-ліги без pre-match odds: {leagues_str}")
     if live_odds_retry_candidates:
         print(f"  [RETRY] кандидатів на повторну перевірку live odds: {len(live_odds_retry_candidates)}")
 
