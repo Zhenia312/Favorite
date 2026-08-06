@@ -73,11 +73,28 @@ def init_db():
         # ── double_chance_odd: кф дабл шансу на фаворита (1X якщо фаворит
         #   вдома, X2 якщо у гостях), забирається в момент спрацювання
         #   сигналу разом з live_odd (з фолбеком на останню відому лінію).
+        # ── fav_form_*/und_form_*/*_season_goals_*: статистика форми
+        #   (last-10) та сезонна результативність фаворита й андердога на
+        #   момент сигналу — забирається один раз при спрацюванні сигналу,
+        #   виводиться в Telegram і зберігається тут для аналізу кореляції
+        #   з ROI.
         for col, col_type in [
             ("edge_side", "TEXT"),
             ("edge_result", "TEXT"),
             ("goals_after_signal", "TEXT"),
             ("double_chance_odd", "REAL"),
+            ("fav_form_win_pct", "REAL"),
+            ("fav_form_draw_pct", "REAL"),
+            ("fav_form_loss_pct", "REAL"),
+            ("fav_form_draw_streak", "INTEGER"),
+            ("fav_form_no_draw_streak", "INTEGER"),
+            ("fav_season_goals_scored_avg", "REAL"),
+            ("fav_season_goals_conceded_avg", "REAL"),
+            ("und_form_win_pct", "REAL"),
+            ("und_form_draw_pct", "REAL"),
+            ("und_form_loss_pct", "REAL"),
+            ("und_season_goals_scored_avg", "REAL"),
+            ("und_season_goals_conceded_avg", "REAL"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
@@ -170,19 +187,35 @@ def recalc_results_v2():
 
 def save_signal(fixture_id, signal_type, league, fav_team, und_team, fav_side,
                  pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
-                 edge_side=None, double_chance_odd=None):
+                 edge_side=None, double_chance_odd=None,
+                 fav_analytics=None, und_analytics=None):
+    fav_form   = (fav_analytics or {}).get("form") or {}
+    fav_season = (fav_analytics or {}).get("season_goals") or {}
+    und_form   = (und_analytics or {}).get("form") or {}
+    und_season = (und_analytics or {}).get("season_goals") or {}
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("""
             INSERT INTO signals (
                 fixture_id, signal_type, league, fav_team, und_team, fav_side,
                 pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
-                signal_time, status, edge_side, double_chance_odd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                signal_time, status, edge_side, double_chance_odd,
+                fav_form_win_pct, fav_form_draw_pct, fav_form_loss_pct,
+                fav_form_draw_streak, fav_form_no_draw_streak,
+                fav_season_goals_scored_avg, fav_season_goals_conceded_avg,
+                und_form_win_pct, und_form_draw_pct, und_form_loss_pct,
+                und_season_goals_scored_avg, und_season_goals_conceded_avg
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             fixture_id, signal_type, league, fav_team, und_team, fav_side,
             pre_odd, live_odd, rise_pct, score_at_signal, minute_at_signal,
             now_kyiv().strftime("%Y-%m-%d %H:%M:%S"), edge_side, double_chance_odd,
+            fav_form.get("win_pct"), fav_form.get("draw_pct"), fav_form.get("loss_pct"),
+            fav_form.get("draw_streak"), fav_form.get("no_draw_streak"),
+            fav_season.get("goals_scored_avg"), fav_season.get("goals_conceded_avg"),
+            und_form.get("win_pct"), und_form.get("draw_pct"), und_form.get("loss_pct"),
+            und_season.get("goals_scored_avg"), und_season.get("goals_conceded_avg"),
         ))
         conn.commit()
         conn.close()
@@ -562,7 +595,12 @@ async def send_export_csv(session):
         cur = conn.execute("""
             SELECT id, fixture_id, signal_type, league, fav_team, und_team, fav_side,
                    pre_odd, live_odd, rise_pct, double_chance_odd, score_at_signal, minute_at_signal,
-                   signal_time, status, final_score, result, checked_time, goals_after_signal
+                   signal_time, status, final_score, result, checked_time, goals_after_signal,
+                   fav_form_win_pct, fav_form_draw_pct, fav_form_loss_pct,
+                   fav_form_draw_streak, fav_form_no_draw_streak,
+                   fav_season_goals_scored_avg, fav_season_goals_conceded_avg,
+                   und_form_win_pct, und_form_draw_pct, und_form_loss_pct,
+                   und_season_goals_scored_avg, und_season_goals_conceded_avg
             FROM signals
             ORDER BY id ASC
         """)
@@ -652,6 +690,225 @@ SOT_TOTAL_MIN_MINUTE    = 30    # не раніше 30-ї хвилини, щоб
 SOT_TOTAL_FAV_ODD_MAX   = 2.00  # власний, м'якший поріг кф фаворита саме для цього типу
                                  # (вищий, ніж NOT_WINNING_FAV_ODD_MAX=1.50, бо тут не
                                  # потрібен настільки явний фаворит — рахунок не головне)
+
+# ── ФОРМА ТА СЕЗОННА РЕЗУЛЬТАТИВНІСТЬ (аналітичний блок для всіх сигналів) ──
+# Забирається ОДИН РАЗ у момент спрацювання будь-якого сигналу (не є умовою
+# фільтрації — тільки додатковий контекст для прийняття рішення, як і
+# SOT/corners/red cards). Кешується по team_id на TEAM_ANALYTICS_CACHE_TTL,
+# щоб не тягнути одні й ті самі дані повторно при кількох сигналах на
+# одну команду за день.
+FORM_LAST_N                    = 10
+FORM_MIN_MATCHES_FOR_DISPLAY   = 3     # менше — дані не показуємо (замало вибірки)
+FORM_DRAW_RISK_PCT             = 40    # % нічиїх у формі, що вважається ризиком
+FORM_DRAW_STREAK_RISK          = 3     # нічиїх поспіль, що вважається ризиком
+TEAM_ANALYTICS_CACHE_TTL       = 6 * 3600
+
+team_analytics_cache = {}
+
+def _fixture_result_for_team(fixture, team_id):
+    """
+    Повертає {"team_goals", "opp_goals", "date"} з точки зору team_id для
+    ОДНОГО завершеного матчу, або None якщо матч не завершений / дані
+    неповні.
+    """
+    status = (fixture.get("fixture", {}).get("status", {}) or {}).get("short", "")
+    if status not in FINISHED_STATUSES:
+        return None
+    goals = fixture.get("goals") or {}
+    gh, ga = goals.get("home"), goals.get("away")
+    if gh is None or ga is None:
+        return None
+    home_id = (fixture.get("teams", {}).get("home") or {}).get("id")
+    is_home = home_id == team_id
+    team_g = gh if is_home else ga
+    opp_g  = ga if is_home else gh
+    date_str = fixture.get("fixture", {}).get("date", "")
+    return {"team_goals": team_g, "opp_goals": opp_g, "date": date_str}
+
+def compute_form_stats(fixtures, team_id, last_n=FORM_LAST_N):
+    """
+    Рахує % перемог/нічиїх/поразок і серії (нічийну і без нічиїх) по
+    останніх last_n ЗАВЕРШЕНИХ матчах команди. Повертає None, якщо
+    даних менше за FORM_MIN_MATCHES_FOR_DISPLAY.
+    """
+    results = []
+    for f in fixtures:
+        r = _fixture_result_for_team(f, team_id)
+        if r:
+            results.append(r)
+    results.sort(key=lambda r: r["date"], reverse=True)
+    results = results[:last_n]
+
+    total = len(results)
+    if total < FORM_MIN_MATCHES_FOR_DISPLAY:
+        return None
+
+    wins   = sum(1 for r in results if r["team_goals"] > r["opp_goals"])
+    draws  = sum(1 for r in results if r["team_goals"] == r["opp_goals"])
+    losses = total - wins - draws
+
+    draw_streak = 0
+    for r in results:
+        if r["team_goals"] == r["opp_goals"]:
+            draw_streak += 1
+        else:
+            break
+
+    no_draw_streak = 0
+    for r in results:
+        if r["team_goals"] != r["opp_goals"]:
+            no_draw_streak += 1
+        else:
+            break
+
+    return {
+        "matches": total,
+        "win_pct": round(wins / total * 100, 1),
+        "draw_pct": round(draws / total * 100, 1),
+        "loss_pct": round(losses / total * 100, 1),
+        "draw_streak": draw_streak,
+        "no_draw_streak": no_draw_streak,
+    }
+
+def compute_season_goals(fixtures, team_id):
+    """
+    Рахує середню кількість забитих/пропущених голів за сезон по всіх
+    ЗАВЕРШЕНИХ матчах команди. Повертає None, якщо даних менше за
+    FORM_MIN_MATCHES_FOR_DISPLAY (типово — нішеві ліги без покриття).
+    """
+    results = []
+    for f in fixtures:
+        r = _fixture_result_for_team(f, team_id)
+        if r:
+            results.append(r)
+
+    total = len(results)
+    if total < FORM_MIN_MATCHES_FOR_DISPLAY:
+        return None
+
+    scored   = sum(r["team_goals"] for r in results)
+    conceded = sum(r["opp_goals"] for r in results)
+    return {
+        "matches": total,
+        "goals_scored_avg": round(scored / total, 2),
+        "goals_conceded_avg": round(conceded / total, 2),
+    }
+
+async def fetch_team_recent_fixtures(session, team_id, last_n=FORM_LAST_N):
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with session.get(
+            f"https://v3.football.api-sports.io/fixtures?team={team_id}&last={last_n}",
+            headers={"x-apisports-key": API_KEY},
+            timeout=timeout
+        ) as r:
+            track_request("football")
+            raw = await r.json()
+            if r.status != 200:
+                print(f"    [FORM⚽] team={team_id} HTTP {r.status}")
+                return []
+            return raw.get("response", [])
+    except Exception as e:
+        print(f"    [FORM⚽ ERROR] team={team_id} {e}")
+        return []
+
+async def fetch_team_season_fixtures(session, team_id, season):
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with session.get(
+            f"https://v3.football.api-sports.io/fixtures?team={team_id}&season={season}",
+            headers={"x-apisports-key": API_KEY},
+            timeout=timeout
+        ) as r:
+            track_request("football")
+            raw = await r.json()
+            if r.status != 200:
+                print(f"    [SEASON⚽] team={team_id} HTTP {r.status}")
+                return []
+            return raw.get("response", [])
+    except Exception as e:
+        print(f"    [SEASON⚽ ERROR] team={team_id} {e}")
+        return []
+
+async def get_team_analytics(session, team_id, season):
+    """
+    Повертає {"form": {...}|None, "season_goals": {...}|None} для команди,
+    кешуючи результат на TEAM_ANALYTICS_CACHE_TTL секунд по team_id.
+    """
+    if team_id is None:
+        return None
+
+    now_ts = now_kyiv().timestamp()
+    cached = team_analytics_cache.get(team_id)
+    if cached and now_ts - cached.get("ts", 0) < TEAM_ANALYTICS_CACHE_TTL:
+        return cached["data"]
+
+    recent_fixtures = await fetch_team_recent_fixtures(session, team_id, FORM_LAST_N)
+    form = compute_form_stats(recent_fixtures, team_id, FORM_LAST_N)
+
+    season_goals = None
+    if season is not None:
+        season_fixtures = await fetch_team_season_fixtures(session, team_id, season)
+        season_goals = compute_season_goals(season_fixtures, team_id)
+
+    data = {"form": form, "season_goals": season_goals}
+    team_analytics_cache[team_id] = {"data": data, "ts": now_ts}
+    return data
+
+def format_analytics_block(fav_safe, und_safe, fav_analytics, und_analytics):
+    """
+    Формує текстовий блок "Форма" для Telegram-повідомлення сигналу.
+    Повертає "" якщо даних немає взагалі ні по фавориту, ні по андердогу.
+    """
+    fav_form   = (fav_analytics or {}).get("form")
+    fav_season = (fav_analytics or {}).get("season_goals")
+    und_form   = (und_analytics or {}).get("form")
+    und_season = (und_analytics or {}).get("season_goals")
+
+    if not fav_form and not fav_season and not und_form and not und_season:
+        return ""
+
+    lines = [f"\n📋 *Форма (посл. {FORM_LAST_N} матчів):*"]
+    risk_lines = []
+
+    if fav_form or fav_season:
+        lines.append(f"{fav_safe} (фаворит):")
+        if fav_form:
+            lines.append(
+                f"  Пер: {fav_form['win_pct']}% / Нічиї: {fav_form['draw_pct']}% / "
+                f"Пораз: {fav_form['loss_pct']}%"
+            )
+            if fav_form["draw_streak"] > 0:
+                lines.append(f"  Нічиїх поспіль: {fav_form['draw_streak']}")
+            elif fav_form["no_draw_streak"] > 0:
+                lines.append(f"  Без нічиїх поспіль: {fav_form['no_draw_streak']}")
+            if (fav_form["draw_pct"] >= FORM_DRAW_RISK_PCT
+                    or fav_form["draw_streak"] >= FORM_DRAW_STREAK_RISK):
+                risk_lines.append("⚠️ Ризик: високий % нічиїх у фаворита в поточній формі")
+        if fav_season:
+            lines.append(
+                f"  Голи за сезон: забито {fav_season['goals_scored_avg']} / "
+                f"пропущено {fav_season['goals_conceded_avg']}"
+            )
+
+    if und_form or und_season:
+        lines.append(f"{und_safe} (андердог):")
+        if und_form:
+            lines.append(
+                f"  Пер: {und_form['win_pct']}% / Нічиї: {und_form['draw_pct']}% / "
+                f"Пораз: {und_form['loss_pct']}%"
+            )
+        if und_season:
+            lines.append(
+                f"  Голи за сезон: забито {und_season['goals_scored_avg']} / "
+                f"пропущено {und_season['goals_conceded_avg']}"
+            )
+
+    if risk_lines:
+        lines.append("")
+        lines.extend(risk_lines)
+
+    return "\n".join(lines)
 
 LIVE_CACHE_TTL = 60
 live_odds_cache = {}
@@ -1447,10 +1704,13 @@ async def _process_football_fixtures(session, fixtures):
         try:
             fid          = fix["fixture"]["id"]
             league_name  = fix.get("league", {}).get("name", "")
+            season       = fix.get("league", {}).get("season")
             minute       = fix["fixture"]["status"].get("elapsed") or 0
             status_short = fix["fixture"]["status"].get("short", "")
             home         = fix["teams"]["home"]["name"]
             away         = fix["teams"]["away"]["name"]
+            home_id      = fix["teams"]["home"].get("id")
+            away_id      = fix["teams"]["away"].get("id")
 
             # ВИПРАВЛЕННЯ #5: захист від None у fix["goals"]
             goals   = fix.get("goals") or {}
@@ -1488,6 +1748,8 @@ async def _process_football_fixtures(session, fixtures):
             fav_odd  = odds_data["fav_odd"]
             fav_team = home if fav_side == "home" else away
             und_team = away if fav_side == "home" else home
+            fav_team_id = home_id if fav_side == "home" else away_id
+            und_team_id = away_id if fav_side == "home" else home_id
 
             print(f"    → fid={fid} фаворит={fav_team} ({fav_side}) odd={fav_odd}")
 
@@ -1642,17 +1904,26 @@ async def _process_football_fixtures(session, fixtures):
             # якщо навіть фолбеку немає.
             double_chance_odd = await fetch_double_chance_odd_football(session, fid, fav_side)
 
+            # ── Форма + сезонна результативність (фаворит і андердог) ────────
+            # Забирається один раз на спрацьований сигнал (не блокує сигнал,
+            # якщо дані недоступні — просто не покажемо блок у повідомленні).
+            fav_analytics = await get_team_analytics(session, fav_team_id, season)
+            und_analytics = await get_team_analytics(session, und_team_id, season)
+
             lg_safe   = escape_md(league_name)
             fav_safe  = escape_md(fav_team)
             und_safe  = escape_md(und_team)
             home_safe = escape_md(home)
             away_safe = escape_md(away)
 
+            analytics_block = format_analytics_block(fav_safe, und_safe, fav_analytics, und_analytics)
+
             if is_losing_case:
                 add_signal(f"{fav_team} програє {fav_score}:{und_score}")
                 save_signal(fid, "fav_losing", league_name, fav_team, und_team, fav_side,
                             fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
-                            double_chance_odd=double_chance_odd)
+                            double_chance_odd=double_chance_odd,
+                            fav_analytics=fav_analytics, und_analytics=und_analytics)
                 await send_msg(session,
                     f"🚨 *СИГНАЛ: ФАВОРИТ ПРОГРАЄ*\n\n"
                     f"⚽ {lg_safe}\n"
@@ -1662,6 +1933,7 @@ async def _process_football_fixtures(session, fixtures):
                     f"Коеф до матчу: {fav_odd}\n"
                     f"Коеф зараз: {live_odd} (+{rise}%)\n"
                     f"💪 {strength(rise)}"
+                    f"{analytics_block}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid}: {fav_team} програє {fav_score}:{und_score} +{rise}%")
 
@@ -1669,7 +1941,8 @@ async def _process_football_fixtures(session, fixtures):
                 add_signal(f"{fav_team} 0:0 {und_team} 2-й тайм")
                 save_signal(fid, "no_goals", league_name, fav_team, und_team, fav_side,
                             fav_odd, live_odd, rise, "0:0", minute,
-                            double_chance_odd=double_chance_odd)
+                            double_chance_odd=double_chance_odd,
+                            fav_analytics=fav_analytics, und_analytics=und_analytics)
                 await send_msg(session,
                     f"🚨 *СИГНАЛ: ФАВОРИТ БЕЗ ГОЛІВ*\n\n"
                     f"⚽ {lg_safe}\n"
@@ -1680,6 +1953,7 @@ async def _process_football_fixtures(session, fixtures):
                     f"Коеф зараз: {live_odd} (+{rise}%)\n"
                     f"Фаворит без голів у другому таймі\n"
                     f"💪 {strength(rise)}"
+                    f"{analytics_block}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} 0:0: {fav_team} vs {und_team} {minute}' +{rise}%")
 
@@ -1687,7 +1961,8 @@ async def _process_football_fixtures(session, fixtures):
                 add_signal(f"{fav_team} не може виграти {score_h}:{score_a}")
                 save_signal(fid, "strong_cant_win", league_name, fav_team, und_team, fav_side,
                             fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
-                            double_chance_odd=double_chance_odd)
+                            double_chance_odd=double_chance_odd,
+                            fav_analytics=fav_analytics, und_analytics=und_analytics)
                 await send_msg(session,
                     f"🚨 *СИГНАЛ: СИЛЬНИЙ ФАВОРИТ НЕ МОЖЕ ВИГРАТИ*\n\n"
                     f"⚽ {lg_safe}\n"
@@ -1698,6 +1973,7 @@ async def _process_football_fixtures(session, fixtures):
                     f"Коеф зараз: {live_odd} (+{rise}%)\n"
                     f"Сильний фаворит (менше {NOT_WINNING_FAV_ODD_MAX}) тримає нічию\n"
                     f"💪 {strength(rise)}"
+                    f"{analytics_block}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} сильний фаворит не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
 
@@ -1705,7 +1981,8 @@ async def _process_football_fixtures(session, fixtures):
                 add_signal(f"{fav_team} не виграє {score_h}:{score_a}")
                 save_signal(fid, "not_winning", league_name, fav_team, und_team, fav_side,
                             fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
-                            double_chance_odd=double_chance_odd)
+                            double_chance_odd=double_chance_odd,
+                            fav_analytics=fav_analytics, und_analytics=und_analytics)
                 await send_msg(session,
                     f"🚨 *СИГНАЛ: ФАВОРИТ НЕ ВИГРАЄ*\n\n"
                     f"⚽ {lg_safe}\n"
@@ -1716,6 +1993,7 @@ async def _process_football_fixtures(session, fixtures):
                     f"Коеф зараз: {live_odd} (+{rise}%)\n"
                     f"Фаворит не веде в рахунку\n"
                     f"💪 {strength(rise)}"
+                    f"{analytics_block}"
                 )
                 print(f"  ⚽ СИГНАЛ fid={fid} не виграє: {fav_team} {score_h}:{score_a} +{rise}%")
 
@@ -1752,7 +2030,8 @@ async def _process_football_fixtures(session, fixtures):
                         add_signal(f"Багато ударів {fav_team} vs {und_team} ({shots_total})")
                         save_signal(fid, "sot_total_high", league_name, fav_team, und_team, fav_side,
                                     fav_odd, live_odd, rise, f"{score_h}:{score_a}", minute,
-                                    edge_side=edge_side, double_chance_odd=double_chance_odd)
+                                    edge_side=edge_side, double_chance_odd=double_chance_odd,
+                                    fav_analytics=fav_analytics, und_analytics=und_analytics)
                         await send_msg(session,
                             f"🚨 *СИГНАЛ: БАГАТО УДАРІВ У ВОРОТА*\n\n"
                             f"⚽ {lg_safe}\n"
@@ -1761,6 +2040,7 @@ async def _process_football_fixtures(session, fixtures):
                             f"Сума ударів у створ: {shots_total} (≥{SOT_TOTAL_MIN_SHOTS})\n"
                             f"{edge_line}\n"
                             f"Фаворит: *{fav_safe}* (коеф {fav_odd})"
+                            f"{analytics_block}"
                         )
                         print(f"  ⚽ СИГНАЛ fid={fid} sot_total_high: сума ударів={shots_total}")
 
